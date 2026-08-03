@@ -1,5 +1,5 @@
 import NextAuth, { type NextAuthConfig } from "next-auth";
-import Resend from "next-auth/providers/resend";
+import Nodemailer from "next-auth/providers/nodemailer";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/db/client";
 import { ensureWorkspaceForUser, getPrimaryWorkspace } from "@/lib/workspace";
@@ -9,8 +9,15 @@ type AdapterPrismaClient = Parameters<typeof PrismaAdapter>[0];
 export const authConfig = {
   adapter: PrismaAdapter(prisma as unknown as AdapterPrismaClient),
   providers: [
-    Resend({
-      apiKey: process.env.RESEND_API_KEY ?? "missing-resend-api-key",
+    Nodemailer({
+      server: {
+        host: process.env.EMAIL_SERVER_HOST ?? "mail.smtp2go.com",
+        port: Number(process.env.EMAIL_SERVER_PORT ?? 587),
+        auth: {
+          user: process.env.EMAIL_SERVER_USER ?? "",
+          pass: process.env.EMAIL_SERVER_PASSWORD ?? "",
+        },
+      },
       from: process.env.EMAIL_FROM ?? "OpenReply <login@example.com>",
     }),
   ],
