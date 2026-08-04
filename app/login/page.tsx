@@ -25,7 +25,7 @@ export default async function LoginPage({
 
   async function sendMagicLink(formData: FormData) {
     "use server";
-    await signIn("resend", {
+    await signIn("nodemailer", {
       email: String(formData.get("email") ?? ""),
       redirectTo: callbackUrl,
     });
