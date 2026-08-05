@@ -875,6 +875,41 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   } catch (error) {
     await releaseWorkspaceDMReservation(automation.workspaceId, usage.periodStart);
 
+    // Meta's generic "unknown error" is usually returned AFTER the reveal DM
+    // was actually delivered (request processed, response lost). Retrying
+    // would re-send it to a user who already has the link — mark SENT and
+    // stop, mirroring the comment path's handling.
+    if (
+      error instanceof MetaApiError &&
+      /unknown error has occurred/i.test(error.message)
+    ) {
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: { automationId: automation.id, commentId: dedupeId },
+        },
+        create: {
+          workspaceId: automation.workspaceId,
+          automationId: automation.id,
+          instagramAccountId: automation.instagramAccountId,
+          commenterId: userId,
+          commenterName,
+          commentText: "(button tap)",
+          commentId: dedupeId,
+          status: "SENT",
+          dmSentAt: new Date(),
+          errorMessage:
+            "Meta reported an unknown error; delivery likely succeeded, not retried to avoid double-send",
+        },
+        update: {
+          status: "SENT",
+          dmSentAt: new Date(),
+          errorMessage:
+            "Meta reported an unknown error; delivery likely succeeded, not retried to avoid double-send",
+        },
+      });
+      return;
+    }
+
     // The read fallback is speculative: it only runs when the user read the
     // opening DM and never tapped the button, which means they never messaged
     // us, which means the 24-hour window is closed and Meta rejects the send
@@ -1185,6 +1220,39 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
         automation.workspaceId,
         usage.periodStart
       );
+
+      // Same ambiguous-delivery handling as the other send paths: Meta's
+      // generic "unknown error" usually means the DM went out but the response
+      // was lost — retrying would double-send. Mark SENT and stop.
+      if (
+        error instanceof MetaApiError &&
+        /unknown error has occurred/i.test(error.message)
+      ) {
+        await prisma.dmLog.upsert({
+          where: {
+            automationId_commentId: {
+              automationId: automation.id,
+              commentId: dedupeId,
+            },
+          },
+          create: {
+            ...logBase,
+            commenterName,
+            status: "SENT",
+            dmSentAt: new Date(),
+            errorMessage:
+              "Meta reported an unknown error; delivery likely succeeded, not retried to avoid double-send",
+          },
+          update: {
+            status: "SENT",
+            dmSentAt: new Date(),
+            errorMessage:
+              "Meta reported an unknown error; delivery likely succeeded, not retried to avoid double-send",
+          },
+        });
+        continue;
+      }
+
       await prisma.dmLog.upsert({
         where: {
           automationId_commentId: {
