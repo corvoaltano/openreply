@@ -60,6 +60,11 @@ const NON_TEMPLATE_REJECTIONS = [
   /outside of allowed window/i,
   /invalid for a private reply/i,
   /requested user cannot be found/i,
+  // Meta's generic server error. It is frequently returned AFTER the message
+  // was actually delivered (request processed, response lost), so treating it
+  // as a template rejection and re-sending as plain text risks double-sending
+  // the DM. Surface it and let the retry policy decide instead.
+  /unknown error has occurred/i,
 ];
 
 function isTemplateRejection(error: unknown): boolean {
@@ -654,6 +659,33 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         automation.workspaceId,
         usage.periodStart
       );
+
+      // Meta's generic "An unknown error has occurred" (code 1) is frequently
+      // returned AFTER the DM was actually delivered (request processed,
+      // response lost). Treating it as a failure and retrying — via BullMQ's
+      // attempts, or via the polling reconciler re-enqueueing the comment —
+      // re-sends the DM to a user who already got it. Mark it SENT so nothing
+      // retries it, and surface the ambiguity in the log row.
+      if (
+        error instanceof MetaApiError &&
+        /unknown error has occurred/i.test(error.message)
+      ) {
+        await prisma.dmLog.update({
+          where: {
+            automationId_commentId: {
+              automationId: automation.id,
+              commentId,
+            },
+          },
+          data: {
+            status: "SENT",
+            dmSentAt: new Date(),
+            errorMessage:
+              "Meta reported an unknown error; delivery likely succeeded, not retried to avoid double-send",
+          },
+        });
+        continue;
+      }
 
       await prisma.dmLog.update({
         where: {

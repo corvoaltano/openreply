@@ -206,13 +206,22 @@ async function sweepCampaign(
     // enough — the reply still has to land); otherwise a SENT DM is enough. This
     // is what lets a comment whose DM sent but whose public reply failed come
     // back and retry the reply.
+    //
+    // Terminal FAILED rows are also treated as handled: re-enqueueing them on
+    // every sweep spawns fresh jobs with fresh BullMQ attempts, re-sending DMs
+    // that Meta may have actually delivered (its generic "unknown error" is
+    // often returned after delivery). Transient rate-limit retries are handled
+    // by the worker itself via its `_retry_` job ids, not by this sweep.
     const handled = await prisma.dmLog.findMany({
       where: {
         automationId: automation.id,
         commentId: { in: needsAction.map((c) => c.id) },
-        ...(automation.publicReplyEnabled
-          ? { publicReplySentAt: { not: null } }
-          : { status: "SENT" }),
+        OR: [
+          ...(automation.publicReplyEnabled
+            ? [{ publicReplySentAt: { not: null } }]
+            : ([{ status: "SENT" }] as const)),
+          { status: "FAILED" } as const,
+        ],
       },
       select: { commentId: true },
     });
