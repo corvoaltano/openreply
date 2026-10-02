@@ -19,6 +19,9 @@ const createAutomationSchema = z
   .object({
     name: z.string().min(1).max(100),
     goal: z.string().min(1).max(120).optional().nullable(),
+    // COMMENT = triggered by a post/reel comment. DM = triggered by an inbound
+    // direct message containing one of the keywords.
+    campaignType: z.enum(["COMMENT", "DM"]).optional().default("COMMENT"),
     instagramAccountId: z.string().min(1).optional().nullable(),
     postId: z.string().min(1).optional().nullable(),
     postUrl: z.string().url().optional().nullable(),
@@ -39,7 +42,13 @@ const createAutomationSchema = z
     followUpMessage: z.string().max(1000).optional().nullable(),
     // Minutes to wait before the follow-up. Capped at 24h so it stays inside
     // Instagram's messaging window.
-    followUpDelayMinutes: z.number().int().min(0).max(1440).optional().default(0),
+    followUpDelayMinutes: z
+      .number()
+      .int()
+      .min(0)
+      .max(1440)
+      .optional()
+      .default(0),
     publicReplyEnabled: z.boolean().optional().default(false),
     publicReplyMessage: z.string().max(1000).optional().nullable(),
     publicReplyMessages: z
@@ -61,10 +70,15 @@ const createAutomationSchema = z
     isActive: z.boolean().optional().default(true),
     wholeWordMatch: z.boolean().optional().default(true),
   })
-  // A campaign must target a specific post, any post, or the next reel.
+  // A comment campaign must target a specific post, any post, or the next
+  // reel. A DM campaign has no post at all, so the rule does not apply to it.
   .refine(
-    (d) => d.matchAnyPost || d.pendingNextReel || Boolean(d.postId),
-    { message: "Choose which post(s) trigger the campaign", path: ["postId"] }
+    (d) =>
+      d.campaignType === "DM" ||
+      d.matchAnyPost ||
+      d.pendingNextReel ||
+      Boolean(d.postId),
+    { message: "Choose which post(s) trigger the campaign", path: ["postId"] },
   )
   // And it must match either specific words or any word.
   .refine((d) => d.matchAnyWord || d.keywords.length >= 1, {
@@ -77,12 +91,16 @@ const createAutomationSchema = z
       !d.openingDmEnabled ||
       (Boolean(d.openingDmMessage?.trim()) &&
         Boolean(d.openingDmButtonLabel?.trim())),
-    { message: "Opening DM needs a message and a button label", path: ["openingDmMessage"] }
+    {
+      message: "Opening DM needs a message and a button label",
+      path: ["openingDmMessage"],
+    },
   );
 
 const updateAutomationSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   goal: z.string().min(1).max(120).optional().nullable(),
+  campaignType: z.enum(["COMMENT", "DM"]).optional(),
   postId: z.string().min(1).optional().nullable(),
   postUrl: z.string().url().optional().nullable(),
   pendingNextReel: z.boolean().optional(),
@@ -126,7 +144,7 @@ export async function GET(request: NextRequest) {
   if (!workspaceId) {
     return NextResponse.json(
       { success: false, error: "Unauthorized" },
-      { status: 401 }
+      { status: 401 },
     );
   }
   const instagramAccountId =
@@ -173,7 +191,7 @@ export async function GET(request: NextRequest) {
         ...automation,
         reportShareSlug: updated.reportShareSlug,
       };
-    })
+    }),
   );
 
   const [statusCounts, clickCounts, keywordCounts] = await Promise.all([
@@ -239,39 +257,39 @@ export async function GET(request: NextRequest) {
           matchedKeyword: row.matchedKeyword,
           _count: row._count._all,
         })),
-      3
+      3,
     );
   }
 
   return NextResponse.json(
     {
-    success: true,
-    data: automationsWithReports.map((automation) => {
-      const item = analytics.get(automation.id) ?? {
-        sent: 0,
-        skipped: 0,
-        failed: 0,
-        clicks: 0,
-        topKeywords: [],
-      };
+      success: true,
+      data: automationsWithReports.map((automation) => {
+        const item = analytics.get(automation.id) ?? {
+          sent: 0,
+          skipped: 0,
+          failed: 0,
+          clicks: 0,
+          topKeywords: [],
+        };
 
-      return {
-        ...automation,
-        trackedLinks: automation.trackedLinks.map((link) => ({
-          ...link,
-          trackedUrl: buildTrackedUrl(link.slug),
-        })),
-        reportUrl: automation.reportShareSlug
-          ? buildReportUrl(automation.reportShareSlug)
-          : null,
-        analytics: {
-          ...item,
-          ctr: calculateCtr(item.clicks, item.sent),
-        },
-      };
-    }),
+        return {
+          ...automation,
+          trackedLinks: automation.trackedLinks.map((link) => ({
+            ...link,
+            trackedUrl: buildTrackedUrl(link.slug),
+          })),
+          reportUrl: automation.reportShareSlug
+            ? buildReportUrl(automation.reportShareSlug)
+            : null,
+          analytics: {
+            ...item,
+            ctr: calculateCtr(item.clicks, item.sent),
+          },
+        };
+      }),
     },
-    { headers: { "Cache-Control": "no-store" } }
+    { headers: { "Cache-Control": "no-store" } },
   );
 }
 
@@ -280,14 +298,14 @@ export async function POST(request: NextRequest) {
   if (!context) {
     return NextResponse.json(
       { success: false, error: "Unauthorized" },
-      { status: 401 }
+      { status: 401 },
     );
   }
 
   if (!canManageWorkspace(context.role)) {
     return NextResponse.json(
       { success: false, error: "Only owners and admins can create campaigns" },
-      { status: 403 }
+      { status: 403 },
     );
   }
 
@@ -303,7 +321,7 @@ export async function POST(request: NextRequest) {
         error: "Invalid input",
         details: parsed.error.flatten(),
       },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -330,19 +348,22 @@ export async function POST(request: NextRequest) {
   if (!workspace) {
     return NextResponse.json(
       { success: false, error: "Workspace not found" },
-      { status: 404 }
+      { status: 404 },
     );
   }
 
   if (!instagramAccount) {
     return NextResponse.json(
       { success: false, error: "Connect Instagram before creating campaigns" },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
-  const { trackedDestinationUrl, secondaryDestinationUrl, secondaryButtonLabel } =
-    parsed.data;
+  const {
+    trackedDestinationUrl,
+    secondaryDestinationUrl,
+    secondaryButtonLabel,
+  } = parsed.data;
 
   // The primary link's button title comes from `linkButtonLabel`; the second
   // link stores its own button title in the tracked link's `label` field.
@@ -371,8 +392,10 @@ export async function POST(request: NextRequest) {
 
   const { pendingNextReel, matchAnyPost, matchAnyWord, openingDmEnabled } =
     parsed.data;
-  // A post is only stored for the "specific post" trigger.
-  const isSpecificPost = !pendingNextReel && !matchAnyPost;
+  const isDmCampaign = parsed.data.campaignType === "DM";
+  // A post is only stored for the "specific post" trigger — and a DM campaign
+  // has no post trigger at all.
+  const isSpecificPost = !isDmCampaign && !pendingNextReel && !matchAnyPost;
   const publicReplyList = (
     parsed.data.publicReplyMessages.length > 0
       ? parsed.data.publicReplyMessages
@@ -387,14 +410,16 @@ export async function POST(request: NextRequest) {
     data: {
       name: parsed.data.name,
       goal: parsed.data.goal,
-      // A next-reel campaign has no post yet; the cron binds it once a reel is posted.
+      campaignType: parsed.data.campaignType,
+      // A next-reel campaign has no post yet; the cron binds it once a reel is
+      // posted. A DM campaign never has a post, pending or bound.
       postId: isSpecificPost ? parsed.data.postId : null,
       postUrl: isSpecificPost ? parsed.data.postUrl : null,
-      pendingNextReel,
-      matchAnyPost,
+      pendingNextReel: isDmCampaign ? false : pendingNextReel,
+      matchAnyPost: isDmCampaign ? false : matchAnyPost,
       keywords: matchAnyWord ? [] : parsed.data.keywords,
       matchAnyWord,
-      dmTriggerEnabled: parsed.data.dmTriggerEnabled,
+      dmTriggerEnabled: isDmCampaign ? true : parsed.data.dmTriggerEnabled,
       dmMessage: parsed.data.dmMessage,
       openingDmEnabled,
       openingDmMessage: openingDmEnabled
@@ -423,7 +448,7 @@ export async function POST(request: NextRequest) {
         ? publicReplyList
         : [],
       publicReplyMessage: parsed.data.publicReplyEnabled
-        ? publicReplyList[0] ?? parsed.data.publicReplyMessage ?? null
+        ? (publicReplyList[0] ?? parsed.data.publicReplyMessage ?? null)
         : null,
       isActive: parsed.data.isActive,
       wholeWordMatch: parsed.data.wholeWordMatch,
@@ -441,7 +466,7 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json(
     { success: true, data: automation },
-    { status: 201 }
+    { status: 201 },
   );
 }
 
@@ -450,14 +475,14 @@ export async function PATCH(request: NextRequest) {
   if (!context) {
     return NextResponse.json(
       { success: false, error: "Unauthorized" },
-      { status: 401 }
+      { status: 401 },
     );
   }
 
   if (!canManageWorkspace(context.role)) {
     return NextResponse.json(
       { success: false, error: "Only owners and admins can update campaigns" },
-      { status: 403 }
+      { status: 403 },
     );
   }
 
@@ -467,7 +492,7 @@ export async function PATCH(request: NextRequest) {
   if (!automationId) {
     return NextResponse.json(
       { success: false, error: "Missing campaign ID" },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -481,7 +506,7 @@ export async function PATCH(request: NextRequest) {
         error: "Invalid input",
         details: parsed.error.flatten(),
       },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -492,7 +517,7 @@ export async function PATCH(request: NextRequest) {
   if (!existing) {
     return NextResponse.json(
       { success: false, error: "Campaign not found" },
-      { status: 404 }
+      { status: 404 },
     );
   }
 
@@ -519,9 +544,43 @@ export async function PATCH(request: NextRequest) {
     automationData.followUpDelayMinutes = 0;
   }
   // Any-post / next-reel campaigns carry no specific post.
-  if (automationData.matchAnyPost === true || automationData.pendingNextReel === true) {
+  if (
+    automationData.matchAnyPost === true ||
+    automationData.pendingNextReel === true
+  ) {
     automationData.postId = null;
     automationData.postUrl = null;
+  }
+  // A DM campaign is never triggered by a post, and it must stay reachable by
+  // the worker's DM lookup. Switching type moves the campaign between the two
+  // paths, so clear the fields the old type owned.
+  //
+  // Only act when the type actually CHANGES: on a plain edit of a comment
+  // campaign, campaignType is "COMMENT" but the DM toggle the user just set
+  // must survive — forcing dmTriggerEnabled to false here would silently drop
+  // the extra trigger they are trying to configure.
+  const switchingToDm = automationData.campaignType === "DM";
+  const switchingToComment =
+    automationData.campaignType === "COMMENT" && existing.campaignType === "DM";
+  if (switchingToDm) {
+    automationData.postId = null;
+    automationData.postUrl = null;
+    automationData.pendingNextReel = false;
+    automationData.matchAnyPost = false;
+    // The keyword IS the trigger for a DM campaign, so the DM path is always on.
+    automationData.dmTriggerEnabled = true;
+    // There is no post to reply under.
+    automationData.publicReplyEnabled = false;
+    automationData.publicReplyMessages = [];
+    automationData.publicReplyMessage = null;
+    // The user already opened the thread, so the opening DM never applies.
+    automationData.openingDmEnabled = false;
+    automationData.openingDmMessage = null;
+    automationData.openingDmButtonLabel = null;
+  } else if (switchingToComment) {
+    // Turning a DM campaign into a comment campaign: the DM path is now opt-in
+    // again, so stop forcing it on.
+    automationData.dmTriggerEnabled = false;
   }
   // Keep the public-reply variations list and the legacy single field in sync.
   if (automationData.publicReplyMessages !== undefined) {
@@ -574,7 +633,10 @@ export async function PATCH(request: NextRequest) {
   // Update, create, or clear the campaign's second tracked link. It is always
   // the link at index [1] (ordered by createdAt), and its `label` holds the
   // second button's title.
-  if (secondaryDestinationUrl !== undefined && secondaryDestinationUrl !== null) {
+  if (
+    secondaryDestinationUrl !== undefined &&
+    secondaryDestinationUrl !== null
+  ) {
     const links = await prisma.trackedLink.findMany({
       where: { automationId },
       orderBy: { createdAt: "asc" },
@@ -589,7 +651,10 @@ export async function PATCH(request: NextRequest) {
     } else if (secondaryLink) {
       await prisma.trackedLink.update({
         where: { id: secondaryLink.id },
-        data: { destinationUrl: secondaryDestinationUrl, label: secondaryLabel },
+        data: {
+          destinationUrl: secondaryDestinationUrl,
+          label: secondaryLabel,
+        },
       });
     } else {
       await prisma.trackedLink.create({
@@ -612,14 +677,14 @@ export async function DELETE(request: NextRequest) {
   if (!context) {
     return NextResponse.json(
       { success: false, error: "Unauthorized" },
-      { status: 401 }
+      { status: 401 },
     );
   }
 
   if (!canManageWorkspace(context.role)) {
     return NextResponse.json(
       { success: false, error: "Only owners and admins can delete campaigns" },
-      { status: 403 }
+      { status: 403 },
     );
   }
 
@@ -629,7 +694,7 @@ export async function DELETE(request: NextRequest) {
   if (!automationId) {
     return NextResponse.json(
       { success: false, error: "Missing campaign ID" },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -640,7 +705,7 @@ export async function DELETE(request: NextRequest) {
   if (!existing) {
     return NextResponse.json(
       { success: false, error: "Campaign not found" },
-      { status: 404 }
+      { status: 404 },
     );
   }
 

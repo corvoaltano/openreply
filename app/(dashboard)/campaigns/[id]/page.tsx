@@ -11,11 +11,14 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import CampaignPreview, { type PreviewTab } from "@/components/campaign-preview";
+import CampaignPreview, {
+  type PreviewTab,
+} from "@/components/campaign-preview";
 
 interface Campaign {
   id: string;
   name: string;
+  campaignType: "COMMENT" | "DM";
   postId: string | null;
   postUrl: string | null;
   pendingNextReel: boolean;
@@ -88,7 +91,7 @@ export default function CampaignDetailPage() {
     fetch(`/api/instagram/profile?instagramAccountId=${acct}`)
       .then((r) => r.json())
       .then((d) =>
-        setAvatarUrl(d.success ? d.data.profilePictureUrl ?? null : null)
+        setAvatarUrl(d.success ? (d.data.profilePictureUrl ?? null) : null),
       )
       .catch(() => setAvatarUrl(null));
 
@@ -151,13 +154,18 @@ export default function CampaignDetailPage() {
   const hasLink = Boolean(campaign.trackedLinks?.[0]?.destinationUrl);
   const hasSecondLink = Boolean(campaign.trackedLinks?.[1]?.destinationUrl);
 
-  const trigger = campaign.matchAnyPost
-    ? "Any post or reel"
-    : campaign.pendingNextReel
-      ? "Your next reel"
-      : "A specific post or reel";
+  const isDm = campaign.campaignType === "DM";
+  const trigger = isDm
+    ? "An inbound DM"
+    : campaign.matchAnyPost
+      ? "Any post or reel"
+      : campaign.pendingNextReel
+        ? "Your next reel"
+        : "A specific post or reel";
   const matchText = campaign.matchAnyWord
-    ? "Any comment"
+    ? isDm
+      ? "Any DM"
+      : "Any comment"
     : campaign.keywords.join(", ") || "No keywords";
 
   const metrics = [
@@ -192,7 +200,9 @@ export default function CampaignDetailPage() {
           </span>
         </div>
 
-        <Summary title="When someone comments on">
+        <Summary
+          title={isDm ? "When someone DMs you" : "When someone comments on"}
+        >
           <div className="flex items-center gap-3">
             {postThumb ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -203,16 +213,20 @@ export default function CampaignDetailPage() {
               />
             ) : (
               <div className="grid h-14 w-14 place-items-center rounded bg-surface-hover text-[10px] text-muted">
-                {campaign.matchAnyPost || campaign.pendingNextReel ? "Any" : "Post"}
+                {isDm
+                  ? "DM"
+                  : campaign.matchAnyPost || campaign.pendingNextReel
+                    ? "Any"
+                    : "Post"}
               </div>
             )}
             <span className="text-sm text-foreground">{trigger}</span>
           </div>
         </Summary>
 
-        <Summary title="And this comment has">
+        <Summary title={isDm ? "And this DM has" : "And this comment has"}>
           <FieldBox>{matchText}</FieldBox>
-          {campaign.dmTriggerEnabled && (
+          {!isDm && campaign.dmTriggerEnabled && (
             <p className="text-xs text-muted">
               Also replies when someone DMs{" "}
               {campaign.matchAnyWord ? "anything" : "these words"}.
@@ -230,7 +244,9 @@ export default function CampaignDetailPage() {
 
         {campaign.openingDmEnabled && (
           <Summary title="They will get an opening DM">
-            <FieldBox>{campaign.openingDmMessage || "Opening message"}</FieldBox>
+            <FieldBox>
+              {campaign.openingDmMessage || "Opening message"}
+            </FieldBox>
             <FieldBox>{campaign.openingDmButtonLabel || "Button"}</FieldBox>
           </Summary>
         )}
@@ -283,7 +299,8 @@ export default function CampaignDetailPage() {
           <Summary title="Then a follow-up message">
             <FieldBox>{campaign.followUpMessage}</FieldBox>
             <p className="text-xs text-muted">
-              {campaign.followUpDelayMinutes && campaign.followUpDelayMinutes > 0
+              {campaign.followUpDelayMinutes &&
+              campaign.followUpDelayMinutes > 0
                 ? `Sent ${campaign.followUpDelayMinutes} min after the link.`
                 : "Sent right after the link."}
             </p>
@@ -295,10 +312,16 @@ export default function CampaignDetailPage() {
       <div className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-3 border-b border-border pb-3">
           <div className="flex gap-4">
-            <TabButton active={tab === "insights"} onClick={() => setTab("insights")}>
+            <TabButton
+              active={tab === "insights"}
+              onClick={() => setTab("insights")}
+            >
               Insights
             </TabButton>
-            <TabButton active={tab === "preview"} onClick={() => setTab("preview")}>
+            <TabButton
+              active={tab === "preview"}
+              onClick={() => setTab("preview")}
+            >
               Preview
             </TabButton>
           </div>
@@ -338,40 +361,47 @@ export default function CampaignDetailPage() {
 
         {tab === "preview" && (
           <div className="flex justify-center sm:justify-start">
-          <CampaignPreview
-            tab={previewTab}
-            onTabChange={setPreviewTab}
-            username={campaign.instagramAccount.username}
-            avatarUrl={avatarUrl}
-            postThumb={postThumb}
-            caption=""
-            sampleComment={campaign.matchAnyWord ? "nice!" : campaign.keywords[0] ?? "LINK"}
-            dmTriggerEnabled={campaign.dmTriggerEnabled}
-            publicReplyEnabled={campaign.publicReplyEnabled}
-            publicReplyMessage={publicReplies[0] ?? ""}
-            openingDmEnabled={campaign.openingDmEnabled}
-            openingDmMessage={campaign.openingDmMessage ?? ""}
-            openingDmButtonLabel={campaign.openingDmButtonLabel ?? ""}
-            revealMessage={campaign.dmMessage}
-            hasLink={hasLink}
-            linkButtonLabel={campaign.linkButtonLabel ?? "Open link"}
-            linkUrl={
-              campaign.trackedLinks?.[0]?.trackedUrl ??
-              campaign.trackedLinks?.[0]?.destinationUrl
-            }
-            hasSecondLink={hasSecondLink}
-            secondLinkButtonLabel={
-              campaign.trackedLinks?.[1]?.label ?? "Open link"
-            }
-            requireFollow={campaign.requireFollow}
-            followPromptMessage={campaign.followPromptMessage ?? ""}
-            followPromptButtonLabel={
-              campaign.followPromptButtonLabel ?? "i'm following"
-            }
-            followUpEnabled={campaign.followUpEnabled ?? false}
-            followUpMessage={campaign.followUpMessage ?? ""}
-            followUpDelayMinutes={campaign.followUpDelayMinutes ?? 0}
-          />
+            <CampaignPreview
+              campaignType={campaign.campaignType ?? "COMMENT"}
+              tab={isDm ? "dmTrigger" : previewTab}
+              onTabChange={setPreviewTab}
+              username={campaign.instagramAccount.username}
+              avatarUrl={avatarUrl}
+              postThumb={postThumb}
+              caption=""
+              sampleComment={
+                campaign.matchAnyWord
+                  ? isDm
+                    ? "fiyat?"
+                    : "nice!"
+                  : (campaign.keywords[0] ?? (isDm ? "FIYAT" : "LINK"))
+              }
+              dmTriggerEnabled={campaign.dmTriggerEnabled}
+              publicReplyEnabled={campaign.publicReplyEnabled}
+              publicReplyMessage={publicReplies[0] ?? ""}
+              openingDmEnabled={campaign.openingDmEnabled}
+              openingDmMessage={campaign.openingDmMessage ?? ""}
+              openingDmButtonLabel={campaign.openingDmButtonLabel ?? ""}
+              revealMessage={campaign.dmMessage}
+              hasLink={hasLink}
+              linkButtonLabel={campaign.linkButtonLabel ?? "Open link"}
+              linkUrl={
+                campaign.trackedLinks?.[0]?.trackedUrl ??
+                campaign.trackedLinks?.[0]?.destinationUrl
+              }
+              hasSecondLink={hasSecondLink}
+              secondLinkButtonLabel={
+                campaign.trackedLinks?.[1]?.label ?? "Open link"
+              }
+              requireFollow={campaign.requireFollow}
+              followPromptMessage={campaign.followPromptMessage ?? ""}
+              followPromptButtonLabel={
+                campaign.followPromptButtonLabel ?? "i'm following"
+              }
+              followUpEnabled={campaign.followUpEnabled ?? false}
+              followUpMessage={campaign.followUpMessage ?? ""}
+              followUpDelayMinutes={campaign.followUpDelayMinutes ?? 0}
+            />
           </div>
         )}
       </div>
@@ -379,7 +409,13 @@ export default function CampaignDetailPage() {
   );
 }
 
-function Summary({ title, children }: { title: string; children: React.ReactNode }) {
+function Summary({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="space-y-2">
       <h2 className="text-sm font-semibold text-foreground">{title}</h2>

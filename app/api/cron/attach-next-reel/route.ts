@@ -29,7 +29,9 @@ export async function GET(request: NextRequest) {
   }
 
   const pending = await prisma.automation.findMany({
-    where: { pendingNextReel: true },
+    // campaignType: "COMMENT" is a guard, not a filter in practice: a DM
+    // campaign has pendingNextReel forced to false on write.
+    where: { pendingNextReel: true, campaignType: "COMMENT" },
     include: { instagramAccount: true },
   });
 

@@ -63,7 +63,9 @@ function errMessage(error: unknown): string {
 /** One reconciliation pass across every active campaign. */
 export async function reconcileComments(): Promise<void> {
   const automations = await prisma.automation.findMany({
-    where: { isActive: true },
+    // Only comment campaigns have comments to sweep. A DM campaign's inbound
+    // messages arrive over the webhook, so there is nothing to reconcile.
+    where: { isActive: true, campaignType: "COMMENT" },
     select: {
       id: true,
       name: true,

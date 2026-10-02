@@ -16,6 +16,7 @@ interface Campaign {
   id: string;
   name: string;
   goal: string | null;
+  campaignType: "COMMENT" | "DM";
   postId: string | null;
   postUrl: string | null;
   pendingNextReel: boolean;
@@ -82,7 +83,7 @@ export default function CampaignsPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "active" | "paused">(
-    "all"
+    "all",
   );
 
   const fetchAutomations = useCallback(async () => {
@@ -93,7 +94,7 @@ export default function CampaignsPage() {
       }
       const res = await fetch(
         `/api/automations${params.size ? `?${params}` : ""}`,
-        { cache: "no-store" }
+        { cache: "no-store" },
       );
       const data = await res.json();
       if (data.success) setAutomations(data.data);
@@ -127,7 +128,7 @@ export default function CampaignsPage() {
     if (automations.length === 0) return;
     let cancelled = false;
     const accountIds = Array.from(
-      new Set(automations.map((a) => a.instagramAccountId))
+      new Set(automations.map((a) => a.instagramAccountId)),
     ).sort();
     const cacheKey = `ig-media:${accountIds.join(",")}`;
 
@@ -155,10 +156,10 @@ export default function CampaignsPage() {
                   media_url?: string;
                   thumbnail_url?: string;
                 }[])
-              : []
+              : [],
           )
-          .catch(() => [])
-      )
+          .catch(() => []),
+      ),
     ).then((lists) => {
       if (cancelled) return;
       const thumbs: Record<string, string> = {};
@@ -205,7 +206,7 @@ export default function CampaignsPage() {
         body: JSON.stringify({ isActive: !isActive }),
       });
       setAutomations((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, isActive: !isActive } : a))
+        prev.map((a) => (a.id === id ? { ...a, isActive: !isActive } : a)),
       );
     } catch (err) {
       console.error("Failed to toggle:", err);
@@ -220,7 +221,7 @@ export default function CampaignsPage() {
       setCopiedId(auto.id);
       window.setTimeout(
         () => setCopiedId((cur) => (cur === auto.id ? null : cur)),
-        1500
+        1500,
       );
     } catch (err) {
       console.error("Failed to copy reel URL:", err);
@@ -239,13 +240,15 @@ export default function CampaignsPage() {
 
   async function duplicateAutomation(auto: Campaign) {
     setMenuOpenId(null);
-    const specific = !auto.matchAnyPost && !auto.pendingNextReel;
+    const isDm = auto.campaignType === "DM";
+    const specific = !isDm && !auto.matchAnyPost && !auto.pendingNextReel;
     try {
       const res = await fetch("/api/automations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: `${auto.name} copy`,
+          campaignType: auto.campaignType,
           instagramAccountId: auto.instagramAccountId,
           postId: specific ? auto.postId : null,
           postUrl: specific ? auto.postUrl : null,
@@ -253,8 +256,9 @@ export default function CampaignsPage() {
           pendingNextReel: auto.pendingNextReel,
           matchAnyWord: auto.matchAnyWord,
           keywords: auto.keywords,
+          dmTriggerEnabled: isDm ? true : undefined,
           dmMessage: auto.dmMessage,
-          openingDmEnabled: auto.openingDmEnabled,
+          openingDmEnabled: isDm ? false : auto.openingDmEnabled,
           openingDmMessage: auto.openingDmMessage,
           openingDmButtonLabel: auto.openingDmButtonLabel,
           publicReplyEnabled: auto.publicReplyEnabled,
@@ -368,7 +372,8 @@ export default function CampaignsPage() {
         <div className="panel rounded p-8 text-center sm:p-12">
           <h3 className="text-lg font-semibold mb-2">No campaigns yet</h3>
           <p className="text-sm text-muted mb-6 max-w-sm mx-auto">
-            Create your first comment-to-DM campaign to turn a post or reel into a measurable conversation flow.
+            Create your first comment-to-DM campaign to turn a post or reel into
+            a measurable conversation flow.
           </p>
           <Link
             href="/campaigns/new"
@@ -391,212 +396,235 @@ export default function CampaignsPage() {
         {filtered.map((auto) => {
           const videoUrl = auto.postId ? videos[auto.postId] : undefined;
           return (
-          <div
-            key={auto.id}
-            onClick={() => router.push(`/campaigns/${auto.id}`)}
-            className="panel rounded p-4 hover:border-border-hover transition-all cursor-pointer"
-          >
-            {/* Wraps rather than compressing: on a phone the action buttons drop
+            <div
+              key={auto.id}
+              onClick={() => router.push(`/campaigns/${auto.id}`)}
+              className="panel rounded p-4 hover:border-border-hover transition-all cursor-pointer"
+            >
+              {/* Wraps rather than compressing: on a phone the action buttons drop
                 to their own line instead of squeezing the campaign summary. */}
-            <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
-              {auto.postId && thumbnails[auto.postId] && (
-                videoUrl ? (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setPlayingVideo({ url: videoUrl, postUrl: auto.postUrl });
-                    }}
-                    aria-label="Play reel preview"
-                    className="shrink-0"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={thumbnails[auto.postId]}
-                      alt="Campaign reel"
-                      className="w-12 h-12 rounded object-cover border border-border hover:border-border-hover"
-                      onError={(e) => {
-                        e.currentTarget.style.display = "none";
+              <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
+                {auto.postId &&
+                  thumbnails[auto.postId] &&
+                  (videoUrl ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setPlayingVideo({
+                          url: videoUrl,
+                          postUrl: auto.postUrl,
+                        });
                       }}
-                    />
-                  </button>
-                ) : (
-                  <a
-                    href={auto.postUrl ?? "#"}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={(e) => e.stopPropagation()}
-                    className="shrink-0"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={thumbnails[auto.postId]}
-                      alt="Campaign post"
-                      className="w-12 h-12 rounded object-cover border border-border"
-                      onError={(e) => {
-                        e.currentTarget.style.display = "none";
-                      }}
-                    />
-                  </a>
-                )
-              )}
-              <div className="min-w-[12rem] flex-1">
-                <div className="flex flex-wrap items-center gap-2 mb-2">
-                  <h3 className="text-sm font-semibold truncate">{auto.name}</h3>
-                  <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs text-muted">
-                    @{auto.instagramAccount.username}
-                  </span>
-                  <span
-                    className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                      auto.isActive
-                        ? "bg-success/10 text-success"
-                        : "bg-zinc-500/10 text-muted"
-                    }`}
-                  >
-                    {auto.isActive ? "Active" : "Paused"}
-                  </span>
-                  {auto.pendingNextReel && (
-                    <span className="shrink-0 rounded-full bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-warning">
-                      Waiting for next reel
-                    </span>
-                  )}
-                  {auto.requireFollow && (
-                    <span className="shrink-0 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">
-                      Follow gate
-                    </span>
-                  )}
-                  {auto.trackedLinks.length >= 2 && (
-                    <span className="shrink-0 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">
-                      2 links
-                    </span>
-                  )}
-                </div>
-
-                {/* Keywords */}
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {auto.keywords.map((kw) => (
-                    <span
-                      key={kw}
-                      className="px-2 py-0.5 rounded-md bg-accent/10 text-accent text-xs font-medium border border-accent/10"
+                      aria-label="Play reel preview"
+                      className="shrink-0"
                     >
-                      {kw}
-                    </span>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={thumbnails[auto.postId]}
+                        alt="Campaign reel"
+                        className="w-12 h-12 rounded object-cover border border-border hover:border-border-hover"
+                        onError={(e) => {
+                          e.currentTarget.style.display = "none";
+                        }}
+                      />
+                    </button>
+                  ) : (
+                    <a
+                      href={auto.postUrl ?? "#"}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="shrink-0"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={thumbnails[auto.postId]}
+                        alt="Campaign post"
+                        className="w-12 h-12 rounded object-cover border border-border"
+                        onError={(e) => {
+                          e.currentTarget.style.display = "none";
+                        }}
+                      />
+                    </a>
                   ))}
-                </div>
+                <div className="min-w-[12rem] flex-1">
+                  <div className="flex flex-wrap items-center gap-2 mb-2">
+                    <h3 className="text-sm font-semibold truncate">
+                      {auto.name}
+                    </h3>
+                    <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs text-muted">
+                      @{auto.instagramAccount.username}
+                    </span>
+                    <span
+                      className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                        auto.isActive
+                          ? "bg-success/10 text-success"
+                          : "bg-zinc-500/10 text-muted"
+                      }`}
+                    >
+                      {auto.isActive ? "Active" : "Paused"}
+                    </span>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${
+                        auto.campaignType === "DM"
+                          ? "bg-violet-500/10 text-violet-400"
+                          : "bg-zinc-500/10 text-muted"
+                      }`}
+                      title={
+                        auto.campaignType === "DM"
+                          ? "Fires when someone DMs a keyword"
+                          : "Fires when someone comments"
+                      }
+                    >
+                      {auto.campaignType === "DM" ? "DM keyword" : "Comment"}
+                    </span>
+                    {auto.pendingNextReel && (
+                      <span className="shrink-0 rounded-full bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-warning">
+                        Waiting for next reel
+                      </span>
+                    )}
+                    {auto.requireFollow && (
+                      <span className="shrink-0 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">
+                        Follow gate
+                      </span>
+                    )}
+                    {auto.trackedLinks.length >= 2 && (
+                      <span className="shrink-0 rounded-full bg-accent/10 px-2 py-0.5 text-xs font-medium text-accent">
+                        2 links
+                      </span>
+                    )}
+                  </div>
 
-                {/* DM preview */}
-                <p className="text-sm text-muted truncate">&ldquo;{auto.dmMessage}&rdquo;</p>
-
-                {/* Tracked link sent */}
-                {auto.trackedLinks[0]?.trackedUrl && (
-                  <p className="mt-2 truncate font-mono text-xs text-zinc-500">
-                    {auto.trackedLinks[0].trackedUrl}
-                  </p>
-                )}
-
-                {/* Stats */}
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3 text-xs text-zinc-500">
-                  <span className="font-medium text-foreground">
-                    {auto._count.dmLogs} runs
-                  </span>
-                  <span>·</span>
-                  <span className="font-medium text-foreground">
-                    {auto.analytics.ctr}% CTR
-                  </span>
-                  <span>·</span>
-                  <span>{auto.analytics.sent} sent</span>
-                  <span>·</span>
-                  <span>{auto.analytics.skipped} skipped</span>
-                  <span>·</span>
-                  <span>{auto.analytics.failed} failed</span>
-                  <span>·</span>
-                  <span>{auto.analytics.clicks} clicks</span>
-                </div>
-
-                {auto.analytics.topKeywords.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {auto.analytics.topKeywords.map((keyword) => (
+                  {/* Keywords */}
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {auto.keywords.map((kw) => (
                       <span
-                        key={keyword.keyword}
-                        className="rounded-md border border-border bg-surface px-2 py-1 text-xs text-muted"
+                        key={kw}
+                        className="px-2 py-0.5 rounded-md bg-accent/10 text-accent text-xs font-medium border border-accent/10"
                       >
-                        {keyword.keyword}: {keyword.count}
+                        {kw}
                       </span>
                     ))}
                   </div>
-                )}
-              </div>
 
-              {/* Actions */}
-              <div
-                className="ml-auto flex items-center gap-2"
-                onClick={(e) => e.stopPropagation()}
-              >
-                {/* Copy reel URL */}
-                {auto.postUrl && (
+                  {/* DM preview */}
+                  <p className="text-sm text-muted truncate">
+                    &ldquo;{auto.dmMessage}&rdquo;
+                  </p>
+
+                  {/* Tracked link sent */}
+                  {auto.trackedLinks[0]?.trackedUrl && (
+                    <p className="mt-2 truncate font-mono text-xs text-zinc-500">
+                      {auto.trackedLinks[0].trackedUrl}
+                    </p>
+                  )}
+
+                  {/* Stats */}
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3 text-xs text-zinc-500">
+                    <span className="font-medium text-foreground">
+                      {auto._count.dmLogs} runs
+                    </span>
+                    <span>·</span>
+                    <span className="font-medium text-foreground">
+                      {auto.analytics.ctr}% CTR
+                    </span>
+                    <span>·</span>
+                    <span>{auto.analytics.sent} sent</span>
+                    <span>·</span>
+                    <span>{auto.analytics.skipped} skipped</span>
+                    <span>·</span>
+                    <span>{auto.analytics.failed} failed</span>
+                    <span>·</span>
+                    <span>{auto.analytics.clicks} clicks</span>
+                  </div>
+
+                  {auto.analytics.topKeywords.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {auto.analytics.topKeywords.map((keyword) => (
+                        <span
+                          key={keyword.keyword}
+                          className="rounded-md border border-border bg-surface px-2 py-1 text-xs text-muted"
+                        >
+                          {keyword.keyword}: {keyword.count}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Actions */}
+                <div
+                  className="ml-auto flex items-center gap-2"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {/* Copy reel URL */}
+                  {auto.postUrl && (
+                    <button
+                      onClick={() => void copyReelUrl(auto)}
+                      className="shrink-0 rounded-full border border-border px-2.5 py-1 text-xs font-medium text-muted transition-colors hover:border-border-hover hover:text-foreground"
+                    >
+                      {copiedId === auto.id ? "Copied!" : "Copy URL"}
+                    </button>
+                  )}
+                  {/* Toggle */}
                   <button
-                    onClick={() => void copyReelUrl(auto)}
-                    className="shrink-0 rounded-full border border-border px-2.5 py-1 text-xs font-medium text-muted transition-colors hover:border-border-hover hover:text-foreground"
-                  >
-                    {copiedId === auto.id ? "Copied!" : "Copy URL"}
-                  </button>
-                )}
-                {/* Toggle */}
-                <button
-                  onClick={() => toggleActive(auto.id, auto.isActive)}
-                  className={`
+                    onClick={() => toggleActive(auto.id, auto.isActive)}
+                    className={`
                     relative w-11 h-6 rounded-full transition-colors
                     ${auto.isActive ? "bg-accent" : "bg-zinc-300"}
                   `}
-                >
-                  <span
-                    className={`
+                  >
+                    <span
+                      className={`
                       absolute top-1 w-4 h-4 rounded-full bg-white transition-transform shadow-sm
                       ${auto.isActive ? "left-6" : "left-1"}
                     `}
-                  />
-                </button>
-
-                {/* Kebab menu */}
-                <div className="relative">
-                  <button
-                    onClick={() =>
-                      setMenuOpenId((cur) => (cur === auto.id ? null : auto.id))
-                    }
-                    aria-label="More actions"
-                    className="px-2 py-1 rounded text-lg leading-none text-muted hover:text-foreground"
-                  >
-                    ⋯
+                    />
                   </button>
-                  {menuOpenId === auto.id && (
-                    <>
-                      <div
-                        className="fixed inset-0 z-10"
-                        onClick={() => setMenuOpenId(null)}
-                      />
-                      <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-lg border border-border bg-surface shadow-lg">
-                        <button
-                          onClick={() => void duplicateAutomation(auto)}
-                          className="block w-full px-3 py-2 text-left text-sm text-foreground hover:bg-surface-hover"
-                        >
-                          Duplicate
-                        </button>
-                        <button
-                          onClick={() => {
-                            setMenuOpenId(null);
-                            void deleteAutomation(auto.id);
-                          }}
-                          className="block w-full px-3 py-2 text-left text-sm text-error hover:bg-surface-hover"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </>
-                  )}
+
+                  {/* Kebab menu */}
+                  <div className="relative">
+                    <button
+                      onClick={() =>
+                        setMenuOpenId((cur) =>
+                          cur === auto.id ? null : auto.id,
+                        )
+                      }
+                      aria-label="More actions"
+                      className="px-2 py-1 rounded text-lg leading-none text-muted hover:text-foreground"
+                    >
+                      ⋯
+                    </button>
+                    {menuOpenId === auto.id && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-10"
+                          onClick={() => setMenuOpenId(null)}
+                        />
+                        <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-lg border border-border bg-surface shadow-lg">
+                          <button
+                            onClick={() => void duplicateAutomation(auto)}
+                            className="block w-full px-3 py-2 text-left text-sm text-foreground hover:bg-surface-hover"
+                          >
+                            Duplicate
+                          </button>
+                          <button
+                            onClick={() => {
+                              setMenuOpenId(null);
+                              void deleteAutomation(auto.id);
+                            }}
+                            className="block w-full px-3 py-2 text-left text-sm text-error hover:bg-surface-hover"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
           );
         })}
       </div>
