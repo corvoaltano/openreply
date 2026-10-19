@@ -12,6 +12,9 @@ import { MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from "@/lib/queue/client";
 import { Prisma } from "@/app/generated/prisma/client";
 
 const OPENING_DM_READ_FALLBACK_DELAY_MS = 5 * 60 * 1000;
+// Only a read shortly after the opening DM is about that DM. A read later on
+// belongs to some other conversation and must not trigger the link.
+const OPENING_DM_READ_WINDOW_MS = 60 * 60 * 1000;
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -188,6 +191,13 @@ export async function POST(request: NextRequest) {
         where: {
           commenterId: event.userId,
           status: "SENT",
+          // The opening DM itself: a comment's private reply, not a reveal
+          // or a DM-keyword reply, sent within the read window.
+          dmSentAt: { gte: new Date(Date.now() - OPENING_DM_READ_WINDOW_MS) },
+          NOT: [
+            { commentId: { startsWith: "reveal:" } },
+            { commentId: { startsWith: "dm:" } },
+          ],
           automation: {
             isActive: true,
             openingDmEnabled: true,

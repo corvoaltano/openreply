@@ -193,6 +193,19 @@ function createMockJob(data = mockJobData) {
   };
 }
 
+// A read fallback only runs right after the opening DM; make the worker's
+// "opening DM sent recently" lookup (keyed on dmSentAt) find one.
+function withRecentOpeningDm() {
+  mockPrisma.dmLog.findFirst.mockImplementation(
+    async (args: { where?: { status?: string; dmSentAt?: unknown } } = {}) =>
+      args.where?.dmSentAt
+        ? { id: "opening_log" }
+        : args.where?.status === "SENT"
+          ? null
+          : { commenterName: "commenter_user" },
+  );
+}
+
 function createMockPostbackJob(
   data: Record<string, unknown> = {
     instagramAccountId: "ig_456",
@@ -669,6 +682,7 @@ describe("DM Worker — Full Pipeline", () => {
       ...mockAutomation,
       trackedLinks: [],
     });
+    withRecentOpeningDm();
 
     const processor = getProcessor();
     await processor(
@@ -721,6 +735,64 @@ describe("DM Worker — Full Pipeline", () => {
     expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
   });
 
+  it("should not deliver a read fallback after any earlier reveal attempt", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([]);
+    mockPrisma.automation.findFirst.mockResolvedValue({
+      ...mockAutomation,
+      trackedLinks: [],
+    });
+    withRecentOpeningDm();
+    mockPrisma.dmLog.findUnique.mockResolvedValue({
+      id: "earlier_reveal",
+      status: "FAILED",
+    });
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "reveal:auto_789",
+        fallback: true,
+      }),
+    );
+
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  // A read long after the opening DM is the person reading an unrelated chat;
+  // the link must not land in the middle of that conversation.
+  it("should not deliver a read fallback when the opening DM is not recent", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([]);
+    mockPrisma.automation.findFirst.mockResolvedValue({
+      ...mockAutomation,
+      trackedLinks: [],
+    });
+    // Default mock: the dmSentAt-bounded "recent opening DM" lookup finds nothing.
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "reveal:auto_789",
+        fallback: true,
+      }),
+    );
+
+    expect(mockPrisma.dmLog.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          automationId: "auto_789",
+          commenterId: "commenter_999",
+          dmSentAt: { gte: expect.any(Date) },
+        }),
+      }),
+    );
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+  });
+
   it("should not let a read fallback bypass the follow gate", async () => {
     mockPrisma.automation.findMany.mockResolvedValue([]);
     mockPrisma.automation.findFirst.mockResolvedValue({
@@ -728,6 +800,7 @@ describe("DM Worker — Full Pipeline", () => {
       requireFollow: true,
       trackedLinks: [],
     });
+    withRecentOpeningDm();
     mockGetUserFollowStatus.mockResolvedValue(false); // still not following
 
     const processor = getProcessor();
@@ -753,6 +826,7 @@ describe("DM Worker — Full Pipeline", () => {
       requireFollow: true,
       trackedLinks: [],
     });
+    withRecentOpeningDm();
     mockGetUserFollowStatus.mockResolvedValue(true);
 
     const processor = getProcessor();
@@ -779,6 +853,7 @@ describe("DM Worker — Full Pipeline", () => {
       ...mockAutomation,
       trackedLinks: [],
     });
+    withRecentOpeningDm();
     mockSendDirectMessage.mockRejectedValue(
       new Error("This message is sent outside of allowed window."),
     );
@@ -870,9 +945,9 @@ describe("DM Worker — one private reply per comment", () => {
     );
 
     const processor = getProcessor();
-    await expect(processor(createMockJob())).rejects.toThrow(
-      "The comment is invalid for a private reply",
-    );
+    // Permanent: logged as FAILED but not re-thrown, so BullMQ does not retry
+    // a comment that can never take a private reply.
+    await expect(processor(createMockJob())).resolves.toBeUndefined();
 
     // A text retry on the same comment would fail identically and overwrite the
     // real reason, so it must not be attempted.
@@ -1082,6 +1157,78 @@ describe("DM Worker — DM keyword trigger", () => {
     expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         create: expect.objectContaining({ status: "SKIPPED_PLAN_LIMIT" }),
+      }),
+    );
+  });
+
+  it("should not reply to a long chat message that merely mentions the keyword", async () => {
+    const processor = getProcessor();
+    await processor(
+      createMockMessageJob({
+        messageText: "there was a repo for this, the agent scanning those skills",
+      }),
+    );
+
+    expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+  });
+
+  it("should answer a message once even when two campaigns share the keyword", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      dmTriggerAutomation,
+      { ...dmTriggerAutomation, id: "auto_copy", name: "copy" },
+    ]);
+    // The second campaign sees the first one's SENT row for this message.
+    mockPrisma.dmLog.findFirst.mockImplementation(
+      async (
+        args: {
+          where?: { commentId?: string; status?: string; automationId?: unknown };
+        } = {},
+      ) =>
+        args.where?.commentId === "dm:mid_abc" &&
+        args.where?.status === "SENT" &&
+        mockSendDirectMessage.mock.calls.length > 0
+          ? { automation: { name: "Test Automation" } }
+          : args.where?.status === "SENT"
+            ? null
+            : { commenterName: "commenter_user" },
+    );
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    expect(mockSendDirectMessage).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          automationId_commentId: {
+            automationId: "auto_copy",
+            commentId: "dm:mid_abc",
+          },
+        },
+        create: expect.objectContaining({ status: "SKIPPED_DEDUP" }),
+      }),
+    );
+  });
+
+  it("should not send the same campaign to the same person twice within the cooldown", async () => {
+    mockPrisma.dmLog.findFirst.mockImplementation(
+      async (args: { where?: { status?: string; dmSentAt?: unknown } } = {}) =>
+        args.where?.dmSentAt
+          ? { id: "sent_a_minute_ago" }
+          : args.where?.status === "SENT"
+            ? null
+            : { commenterName: "commenter_user" },
+    );
+
+    const processor = getProcessor();
+    await processor(createMockMessageJob({ messageText: "kurulum" }));
+
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ status: "SKIPPED_DEDUP" }),
       }),
     );
   });

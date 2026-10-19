@@ -67,6 +67,36 @@ const NON_TEMPLATE_REJECTIONS = [
   /unknown error has occurred/i,
 ];
 
+// Meta rejections that will fail the same way on every retry: the comment can
+// never take a private reply (most often the commenter's message settings), or
+// the user no longer exists. Retrying only burns BullMQ attempts and API calls.
+const PERMANENT_REJECTIONS = [
+  /invalid for a private reply/i,
+  /requested user cannot be found/i,
+];
+
+function isPermanentRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : "";
+  return PERMANENT_REJECTIONS.some((pattern) => pattern.test(message));
+}
+
+// A DM keyword trigger answers a request ("repo", "send the link"), not a
+// conversation. A long message that merely mentions the keyword is someone
+// chatting, so it must not get an autoreply in the middle of a conversation.
+const DM_TRIGGER_MAX_WORDS = 6;
+
+// One autoreply per campaign per person in this window, so typing the keyword
+// twice in a row ("jarvis", "kurulum") does not send the link twice.
+const DM_TRIGGER_COOLDOWN_MS = 10 * 60 * 1000;
+
+// A read fallback only makes sense right after the opening DM. Past this age
+// the read is from some later, unrelated conversation.
+const READ_FALLBACK_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
 function isTemplateRejection(error: unknown): boolean {
   if (error instanceof TokenExpiredError || error instanceof RateLimitError) {
     return false;
@@ -708,6 +738,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           errorMessage: formatError(error),
         },
       });
+      // Logged as FAILED, but not retried: a retry hits the same wall.
+      if (isPermanentRejection(error)) continue;
       throw error;
     }
   }
@@ -752,6 +784,8 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   const dedupeId = `reveal:${userId}`;
 
   if (fallback) {
+    // Any earlier reveal attempt for this person (a tap, or a previous
+    // fallback) means the fallback has nothing left to do.
     const existingReveal = await prisma.dmLog.findUnique({
       where: {
         automationId_commentId: {
@@ -760,7 +794,25 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
         },
       },
     });
-    if (existingReveal?.status === "SENT") return;
+    if (existingReveal) return;
+
+    // Only follow up on an opening DM sent moments ago. A read days later is
+    // the person reading some unrelated chat, and sending the link then drops
+    // an automated message into a conversation that has nothing to do with it.
+    const recentOpening = await prisma.dmLog.findFirst({
+      where: {
+        automationId: automation.id,
+        commenterId: userId,
+        status: "SENT",
+        dmSentAt: { gte: new Date(Date.now() - READ_FALLBACK_MAX_AGE_MS) },
+        NOT: [
+          { commentId: { startsWith: "reveal:" } },
+          { commentId: { startsWith: "dm:" } },
+        ],
+      },
+      select: { id: true },
+    });
+    if (!recentOpening) return;
   }
 
   // Personalize {username} from the opening DM log for this user, if present.
@@ -1013,6 +1065,9 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
 async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   const { instagramAccountId, messageId, messageText, senderId } = job.data;
 
+  // Someone chatting, not asking for the link — see DM_TRIGGER_MAX_WORDS.
+  if (countWords(messageText) > DM_TRIGGER_MAX_WORDS) return;
+
   const automations = await prisma.automation.findMany({
     where: {
       // Comment campaigns opt in with the "also reply when someone DMs"
@@ -1072,6 +1127,47 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       commentId: dedupeId,
       matchedKeyword: matchResult.matchedKeyword,
     };
+
+    // One autoreply per inbound message. Duplicated campaigns sharing a
+    // keyword would otherwise each answer it, so the person gets the same
+    // message twice. The earliest campaign wins; the rest are logged as skipped.
+    const answeredBy = await prisma.dmLog.findFirst({
+      where: {
+        commentId: dedupeId,
+        status: "SENT",
+        automationId: { not: automation.id },
+      },
+      select: { automation: { select: { name: true } } },
+    });
+    // And one per person per campaign within the cooldown, so sending the
+    // keyword twice in a row does not deliver the link twice.
+    const recentlySent = answeredBy
+      ? null
+      : await prisma.dmLog.findFirst({
+          where: {
+            automationId: automation.id,
+            commenterId: senderId,
+            status: "SENT",
+            dmSentAt: { gte: new Date(Date.now() - DM_TRIGGER_COOLDOWN_MS) },
+          },
+          select: { id: true },
+        });
+    if (answeredBy || recentlySent) {
+      const reason = answeredBy
+        ? `Another campaign (${answeredBy.automation?.name ?? "unknown"}) already answered this message`
+        : "This person already got this campaign's message in the last 10 minutes";
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: {
+            automationId: automation.id,
+            commentId: dedupeId,
+          },
+        },
+        create: { ...logBase, status: "SKIPPED_DEDUP", errorMessage: reason },
+        update: { status: "SKIPPED_DEDUP", errorMessage: reason },
+      });
+      continue;
+    }
 
     if (!automation.instagramAccount.accessToken) {
       await prisma.dmLog.upsert({
@@ -1283,6 +1379,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           errorMessage: formatError(error),
         },
       });
+      if (isPermanentRejection(error)) continue;
       throw error;
     }
   }
