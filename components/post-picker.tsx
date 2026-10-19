@@ -5,7 +5,8 @@
 /**
  * Post Picker
  *
- * Grid of Instagram post thumbnails, selectable.
+ * Grid of Instagram post thumbnails. Several can be selected — each click
+ * toggles one; the parent owns the selection.
  * Fetches from /api/instagram/posts.
  */
 
@@ -23,7 +24,8 @@ interface InstagramPost {
 }
 
 interface PostPickerProps {
-  selectedPostId: string | null;
+  /** Selected post IDs in selection order; the first is the primary post. */
+  selectedPostIds: string[];
   instagramAccountId?: string | null;
   /** postId -> name of the campaign already using it. Flagged in the grid. */
   usedPostIds?: Record<string, string>;
@@ -36,7 +38,7 @@ interface PostPickerProps {
 }
 
 export default function PostPicker({
-  selectedPostId,
+  selectedPostIds,
   instagramAccountId,
   usedPostIds,
   onSelect,
@@ -136,6 +138,11 @@ export default function PostPicker({
         />
         <span className="shrink-0 text-xs text-muted">{posts.length}</span>
       </div>
+      <p className="px-1 text-[11px] text-muted">
+        {selectedPostIds.length > 1
+          ? `${selectedPostIds.length} selected — a comment on any of them triggers this campaign`
+          : "Select one or more posts — e.g. every version of a test reel"}
+      </p>
       {visible.length === 0 ? (
         <p className="py-6 text-center text-sm text-muted">
           No posts match &ldquo;{query}&rdquo;
@@ -150,7 +157,8 @@ export default function PostPicker({
           )}
           <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-64 overflow-y-auto p-1">
             {visible.map((post) => {
-              const isSelected = selectedPostId === post.id;
+              const selectedIndex = selectedPostIds.indexOf(post.id);
+              const isSelected = selectedIndex !== -1;
               const usedByName = usedPostIds?.[post.id];
               const isUsed = Boolean(usedByName) && !isSelected;
               const thumb = post.thumbnail_url ?? post.media_url;
@@ -206,7 +214,9 @@ export default function PostPicker({
             )}
             {isSelected && (
               <span className="absolute bottom-0 inset-x-0 bg-accent text-white text-xs py-1">
-                Selected
+                {selectedPostIds.length > 1
+                  ? `Selected · ${selectedIndex + 1}`
+                  : "Selected"}
               </span>
             )}
           </button>

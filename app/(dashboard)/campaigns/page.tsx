@@ -18,6 +18,7 @@ interface Campaign {
   goal: string | null;
   campaignType: "COMMENT" | "DM";
   postId: string | null;
+  postIds?: string[];
   postUrl: string | null;
   pendingNextReel: boolean;
   matchAnyPost: boolean;
@@ -251,6 +252,7 @@ export default function CampaignsPage() {
           campaignType: auto.campaignType,
           instagramAccountId: auto.instagramAccountId,
           postId: specific ? auto.postId : null,
+          postIds: specific ? (auto.postIds ?? []) : [],
           postUrl: specific ? auto.postUrl : null,
           matchAnyPost: auto.matchAnyPost,
           pendingNextReel: auto.pendingNextReel,
@@ -456,6 +458,11 @@ export default function CampaignsPage() {
                     <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs text-muted">
                       @{auto.instagramAccount.username}
                     </span>
+                    {(auto.postIds?.length ?? 0) > 1 && (
+                      <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs text-muted">
+                        {auto.postIds?.length} posts
+                      </span>
+                    )}
                     <span
                       className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                         auto.isActive

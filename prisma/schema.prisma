@@ -179,6 +179,11 @@ model Automation {
   campaignType            CampaignType @default(COMMENT)
   postId                  String?
   postUrl                 String?
+  // Every post/reel that triggers this campaign (e.g. test versions of the
+  // same reel sharing one lead magnet). postId stays as the primary post —
+  // always postIds[0] when set — so thumbnails, reports and older code that
+  // only read postId keep working.
+  postIds                 String[]     @default([])
   pendingNextReel         Boolean      @default(false)
   matchAnyPost            Boolean      @default(false)
   keywords                String[]
@@ -220,6 +225,7 @@ model Automation {
   @@index([workspaceId])
   @@index([instagramAccountId])
   @@index([postId])
+  @@index([postIds], type: Gin)
   // The DM worker resolves campaigns by type + account on every inbound message.
   @@index([campaignType, instagramAccountId])
 }

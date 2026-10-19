@@ -70,6 +70,7 @@ export async function reconcileComments(): Promise<void> {
       id: true,
       name: true,
       postId: true,
+      postIds: true,
       matchAnyPost: true,
       matchAnyWord: true,
       keywords: true,
@@ -110,6 +111,7 @@ async function sweepCampaign(
     id: string;
     name: string;
     postId: string | null;
+    postIds: string[];
     matchAnyPost: boolean;
     matchAnyWord: boolean;
     keywords: string[];
@@ -152,11 +154,16 @@ async function sweepCampaign(
     return stat;
   }
 
-  // Which media this campaign covers: its own post, or the recent feed if it
-  // matches any post.
+  // Which media this campaign covers: its own post(s), or the recent feed if
+  // it matches any post.
   const mediaIds: string[] = [];
-  if (automation.postId) {
-    mediaIds.push(automation.postId);
+  const ownPosts = new Set(
+    [automation.postId, ...(automation.postIds ?? [])].filter(
+      (id): id is string => Boolean(id)
+    )
+  );
+  if (ownPosts.size > 0) {
+    mediaIds.push(...ownPosts);
   } else if (automation.matchAnyPost) {
     try {
       const media = await getUserMedia(accessToken, RECENT_MEDIA_LIMIT);

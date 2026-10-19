@@ -288,7 +288,12 @@ describe("DM Worker — Full Pipeline", () => {
         // A DM campaign must never be picked up by a comment, even if it is
         // bound to the same post/account.
         campaignType: "COMMENT",
-        OR: [{ postId: "media_101" }, { matchAnyPost: true }],
+        // A multi-post campaign matches when this media is any of its posts.
+        OR: [
+          { postId: "media_101" },
+          { postIds: { has: "media_101" } },
+          { matchAnyPost: true },
+        ],
         isActive: true,
         instagramAccount: { instagramId: "ig_456" },
       },

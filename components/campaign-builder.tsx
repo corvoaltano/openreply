@@ -36,6 +36,7 @@ interface LoadedCampaign {
   name: string;
   campaignType: "COMMENT" | "DM";
   postId: string | null;
+  postIds?: string[];
   postUrl: string | null;
   pendingNextReel: boolean;
   matchAnyPost: boolean;
@@ -150,10 +151,23 @@ export default function CampaignBuilder({
 
   const [campaignType, setCampaignType] = useState<CampaignType>("COMMENT");
   const [triggerScope, setTriggerScope] = useState<TriggerScope>("specific");
-  const [postId, setPostId] = useState<string | null>(null);
-  const [postUrl, setPostUrl] = useState<string | null>(null);
-  const [postThumb, setPostThumb] = useState<string | null>(null);
-  const [postCaption, setPostCaption] = useState("");
+  // Every post/reel that triggers the campaign, in selection order. The first
+  // is the primary post: it is saved as postId and drives the preview.
+  const [postIds, setPostIds] = useState<string[]>([]);
+  // What the picker told us about each selected post (permalink, thumbnail,
+  // caption). Posts loaded from a saved campaign may only have a permalink.
+  const [postMeta, setPostMeta] = useState<
+    Record<string, { url: string | null; thumb: string | null; caption: string }>
+  >({});
+  const postId = postIds[0] ?? null;
+  const postUrl = postId ? (postMeta[postId]?.url ?? null) : null;
+  const postThumb = postId ? (postMeta[postId]?.thumb ?? null) : null;
+  const postCaption = postId ? (postMeta[postId]?.caption ?? "") : "";
+
+  function clearPosts() {
+    setPostIds([]);
+    setPostMeta({});
+  }
 
   // Post IDs already tied to another automation on this account, so the picker
   // can flag them and the user knows not to double-assign. Maps postId ->
@@ -270,8 +284,17 @@ export default function CampaignBuilder({
         setTriggerScope(
           c.matchAnyPost ? "any" : c.pendingNextReel ? "next" : "specific",
         );
-        setPostId(c.postId);
-        setPostUrl(c.postUrl);
+        const loadedPostIds = c.postIds?.length
+          ? c.postIds
+          : c.postId
+            ? [c.postId]
+            : [];
+        setPostIds(loadedPostIds);
+        setPostMeta(
+          c.postId
+            ? { [c.postId]: { url: c.postUrl, thumb: null, caption: "" } }
+            : {},
+        );
         setMatchMode(c.matchAnyWord ? "any" : "specific");
         setKeywordText(c.keywords.join(", "));
         setDmTriggerEnabled(c.dmTriggerEnabled ?? false);
@@ -321,10 +344,11 @@ export default function CampaignBuilder({
         if (cancelled || !payload.success) return;
         const map: Record<string, string> = {};
         for (const a of payload.data as LoadedCampaign[]) {
-          if (!a.postId) continue;
           if (a.instagramAccountId !== selectedAccountId) continue;
           if (mode === "edit" && a.id === campaignId) continue;
-          map[a.postId] = a.name;
+          for (const id of [a.postId, ...(a.postIds ?? [])]) {
+            if (id) map[id] = a.name;
+          }
         }
         setUsedPosts(map);
       })
@@ -339,10 +363,7 @@ export default function CampaignBuilder({
   function prefillFromRow(row: ImportRow) {
     setName(row.name ?? "");
     setTriggerScope("specific");
-    setPostId(null);
-    setPostUrl(null);
-    setPostThumb(null);
-    setPostCaption("");
+    clearPosts();
     setMatchMode("specific");
     setKeywordText((row.keywords ?? []).join(", "));
     setDmMessage(row.dmMessage ?? "");
@@ -389,10 +410,17 @@ export default function CampaignBuilder({
     thumb?: string,
     caption?: string,
   ) {
-    setPostId(id);
-    setPostUrl(url ?? null);
-    setPostThumb(thumb ?? null);
-    setPostCaption(caption ?? "");
+    // Clicking a selected post deselects it; any other click adds it. The API
+    // caps a campaign at 20 posts.
+    if (!postIds.includes(id) && postIds.length >= 20)
+      return setError("A campaign can target up to 20 posts.");
+    setPostIds((cur) =>
+      cur.includes(id) ? cur.filter((p) => p !== id) : [...cur, id],
+    );
+    setPostMeta((cur) => ({
+      ...cur,
+      [id]: { url: url ?? null, thumb: thumb ?? null, caption: caption ?? "" },
+    }));
   }
 
   function ensureLinkToken() {
@@ -429,6 +457,10 @@ export default function CampaignBuilder({
         campaignType === "COMMENT" && triggerScope === "specific"
           ? postId
           : null,
+      postIds:
+        campaignType === "COMMENT" && triggerScope === "specific"
+          ? postIds
+          : [],
       postUrl:
         campaignType === "COMMENT" && triggerScope === "specific"
           ? postUrl
@@ -491,13 +523,12 @@ export default function CampaignBuilder({
         // the picker flags it on the next imported row — the fetch that builds
         // this map doesn't re-run while the builder stays mounted through the
         // import queue.
-        if (
-          campaignType === "COMMENT" &&
-          triggerScope === "specific" &&
-          postId
-        ) {
-          const assignedPostId = postId;
-          setUsedPosts((prev) => ({ ...prev, [assignedPostId]: payload.name }));
+        if (campaignType === "COMMENT" && triggerScope === "specific") {
+          const assigned = postIds;
+          setUsedPosts((prev) => ({
+            ...prev,
+            ...Object.fromEntries(assigned.map((id) => [id, payload.name])),
+          }));
         }
         // Importing: advance to the next queued row instead of leaving.
         if (importQueue && importQueue.length > 1) {
@@ -705,9 +736,7 @@ export default function CampaignBuilder({
                   value={selectedAccountId}
                   onChange={(id) => {
                     setSelectedAccountId(id);
-                    setPostId(null);
-                    setPostUrl(null);
-                    setPostThumb(null);
+                    clearPosts();
                   }}
                   includeAll={false}
                   label="Instagram account"
@@ -743,12 +772,12 @@ export default function CampaignBuilder({
                 checked={triggerScope === "specific"}
                 onSelect={() => setTriggerScope("specific")}
               >
-                a specific post or reel
+                specific posts or reels
               </Radio>
               {triggerScope === "specific" && (
                 <div className="rounded-lg border border-border p-2">
                   <PostPicker
-                    selectedPostId={postId}
+                    selectedPostIds={postIds}
                     instagramAccountId={selectedAccountId}
                     usedPostIds={usedPosts}
                     onSelect={handlePostSelect}

@@ -206,11 +206,16 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
   const automations = await prisma.automation.findMany({
     where: {
-      // Match campaigns bound to this specific post, plus any-post campaigns.
-      // A DM campaign has no post, so it is excluded here by type as well as by
-      // its empty post fields — its only trigger is an inbound message.
+      // Match campaigns bound to this post (as their primary post or one of
+      // several), plus any-post campaigns. A DM campaign has no post, so it is
+      // excluded here by type as well as by its empty post fields — its only
+      // trigger is an inbound message.
       campaignType: "COMMENT",
-      OR: [{ postId: mediaId }, { matchAnyPost: true }],
+      OR: [
+        { postId: mediaId },
+        { postIds: { has: mediaId } },
+        { matchAnyPost: true },
+      ],
       isActive: true,
       instagramAccount: {
         instagramId: instagramAccountId,

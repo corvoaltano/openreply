@@ -64,9 +64,11 @@ export async function POST(request: NextRequest) {
 
   const existing = await prisma.automation.findMany({
     where: { instagramAccountId: account.id },
-    select: { postId: true },
+    select: { postId: true, postIds: true },
   });
-  const usedPostIds = new Set(existing.map((a) => a.postId));
+  const usedPostIds = new Set(
+    existing.flatMap((a) => [a.postId, ...(a.postIds ?? [])])
+  );
 
   const created: { name: string; postId: string }[] = [];
   const skipped: { row: number; reason: string }[] = [];
@@ -93,6 +95,7 @@ export async function POST(request: NextRequest) {
         name,
         goal: (campaign.goal ?? "").trim().slice(0, 120) || null,
         postId: campaign.postId,
+        postIds: [campaign.postId],
         postUrl: campaign.postUrl ?? null,
         keywords: campaign.keywords,
         dmMessage: campaign.dmMessage.slice(0, 1000),

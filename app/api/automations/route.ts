@@ -15,6 +15,25 @@ import {
 // immediately), so never cache it at the route or CDN layer.
 export const dynamic = "force-dynamic";
 
+// How many posts/reels one campaign may target. Each one is swept by the
+// comment reconciler, so the cap keeps Graph API calls bounded.
+const MAX_CAMPAIGN_POSTS = 20;
+
+const postIdsSchema = z.array(z.string().min(1)).max(MAX_CAMPAIGN_POSTS);
+
+/**
+ * The full post list for a specific-post campaign. `postIds` wins when sent;
+ * a client that only sends `postId` (older builder, duplicate, import) gets a
+ * one-post list. The primary post is always first.
+ */
+function resolvePostIds(
+  postId: string | null | undefined,
+  postIds: string[] | undefined,
+): string[] {
+  const list = postIds && postIds.length > 0 ? postIds : postId ? [postId] : [];
+  return [...new Set(list)];
+}
+
 const createAutomationSchema = z
   .object({
     name: z.string().min(1).max(100),
@@ -24,6 +43,7 @@ const createAutomationSchema = z
     campaignType: z.enum(["COMMENT", "DM"]).optional().default("COMMENT"),
     instagramAccountId: z.string().min(1).optional().nullable(),
     postId: z.string().min(1).optional().nullable(),
+    postIds: postIdsSchema.optional(),
     postUrl: z.string().url().optional().nullable(),
     pendingNextReel: z.boolean().optional().default(false),
     matchAnyPost: z.boolean().optional().default(false),
@@ -77,7 +97,7 @@ const createAutomationSchema = z
       d.campaignType === "DM" ||
       d.matchAnyPost ||
       d.pendingNextReel ||
-      Boolean(d.postId),
+      resolvePostIds(d.postId, d.postIds).length > 0,
     { message: "Choose which post(s) trigger the campaign", path: ["postId"] },
   )
   // And it must match either specific words or any word.
@@ -102,6 +122,7 @@ const updateAutomationSchema = z.object({
   goal: z.string().min(1).max(120).optional().nullable(),
   campaignType: z.enum(["COMMENT", "DM"]).optional(),
   postId: z.string().min(1).optional().nullable(),
+  postIds: postIdsSchema.optional(),
   postUrl: z.string().url().optional().nullable(),
   pendingNextReel: z.boolean().optional(),
   matchAnyPost: z.boolean().optional(),
@@ -396,6 +417,9 @@ export async function POST(request: NextRequest) {
   // A post is only stored for the "specific post" trigger — and a DM campaign
   // has no post trigger at all.
   const isSpecificPost = !isDmCampaign && !pendingNextReel && !matchAnyPost;
+  const postIds = isSpecificPost
+    ? resolvePostIds(parsed.data.postId, parsed.data.postIds)
+    : [];
   const publicReplyList = (
     parsed.data.publicReplyMessages.length > 0
       ? parsed.data.publicReplyMessages
@@ -413,7 +437,8 @@ export async function POST(request: NextRequest) {
       campaignType: parsed.data.campaignType,
       // A next-reel campaign has no post yet; the cron binds it once a reel is
       // posted. A DM campaign never has a post, pending or bound.
-      postId: isSpecificPost ? parsed.data.postId : null,
+      postId: postIds[0] ?? null,
+      postIds,
       postUrl: isSpecificPost ? parsed.data.postUrl : null,
       pendingNextReel: isDmCampaign ? false : pendingNextReel,
       matchAnyPost: isDmCampaign ? false : matchAnyPost,
@@ -543,12 +568,24 @@ export async function PATCH(request: NextRequest) {
     automationData.followUpMessage = null;
     automationData.followUpDelayMinutes = 0;
   }
+  // Keep the post list and the primary postId in sync. Sending only postId
+  // (older builder) replaces the list with that one post; sending postIds
+  // makes its first entry the primary post.
+  if (
+    automationData.postIds !== undefined ||
+    automationData.postId !== undefined
+  ) {
+    const list = resolvePostIds(automationData.postId, automationData.postIds);
+    automationData.postIds = list;
+    automationData.postId = list[0] ?? null;
+  }
   // Any-post / next-reel campaigns carry no specific post.
   if (
     automationData.matchAnyPost === true ||
     automationData.pendingNextReel === true
   ) {
     automationData.postId = null;
+    automationData.postIds = [];
     automationData.postUrl = null;
   }
   // A DM campaign is never triggered by a post, and it must stay reachable by
@@ -564,6 +601,7 @@ export async function PATCH(request: NextRequest) {
     automationData.campaignType === "COMMENT" && existing.campaignType === "DM";
   if (switchingToDm) {
     automationData.postId = null;
+    automationData.postIds = [];
     automationData.postUrl = null;
     automationData.pendingNextReel = false;
     automationData.matchAnyPost = false;

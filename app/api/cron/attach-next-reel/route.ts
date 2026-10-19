@@ -82,6 +82,7 @@ export async function GET(request: NextRequest) {
         where: { id: automation.id },
         data: {
           postId: nextReel.id,
+          postIds: [nextReel.id],
           postUrl: nextReel.permalink ?? null,
           pendingNextReel: false,
         },
