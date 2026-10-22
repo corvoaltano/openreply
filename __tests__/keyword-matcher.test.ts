@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  foldText,
   matchKeywords,
   stripSpecialCharacters,
 } from "../lib/utils/keyword-matcher";
@@ -33,6 +34,47 @@ describe("stripSpecialCharacters", () => {
 
   it("should preserve numbers", () => {
     expect(stripSpecialCharacters("price123")).toBe("price123");
+  });
+
+  it("should keep Turkish letters", () => {
+    expect(stripSpecialCharacters("Özgün! 🔥 çağrı")).toBe("Özgün çağrı");
+  });
+});
+
+describe("foldText", () => {
+  it("should fold Turkish letters to their Latin base", () => {
+    expect(foldText("ÖZGÜN çağrı şişe İSTANBUL ılık")).toBe("ozgun cagri sise istanbul ilik");
+  });
+
+  it("should treat I and İ alike", () => {
+    expect(foldText("API")).toBe(foldText("apı"));
+    expect(foldText("SEVİYE")).toBe("seviye");
+  });
+});
+
+describe("matchKeywords — Turkish", () => {
+  it("should match a Turkish keyword however it is typed", () => {
+    for (const comment of ["özgün", "Özgün!", "ÖZGÜN 🔥", "ozgun", "bana OZGUN lazım"]) {
+      expect(matchKeywords(comment, ["ÖZGÜN"], true).matched).toBe(true);
+    }
+  });
+
+  it("should not match a different word that only shares the ASCII letters", () => {
+    expect(matchKeywords("çok üzgünüm", ["ÖZGÜN"], true).matched).toBe(false);
+    expect(matchKeywords("üzgün", ["ÖZGÜN"], true).matched).toBe(false);
+    expect(matchKeywords("bir ara bakarım", ["ARAÇ"], true).matched).toBe(false);
+  });
+
+  it("should match Turkish keywords that used to lose letters", () => {
+    expect(matchKeywords("araç", ["ARAÇ"], true).matched).toBe(true);
+    expect(matchKeywords("arac", ["ARAÇ"], true).matched).toBe(true);
+    expect(matchKeywords("seviye", ["SEVİYE"], true).matched).toBe(true);
+    expect(matchKeywords("BAŞLANGIÇ", ["başlangıç"], true).matched).toBe(true);
+  });
+
+  it("should keep whole-word edges next to Turkish letters", () => {
+    expect(matchKeywords("linkçi", ["link"], true).matched).toBe(false);
+    expect(matchKeywords("link, çabuk", ["link"], true).matched).toBe(true);
   });
 });
 
