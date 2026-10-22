@@ -1,6 +1,7 @@
 import NextAuth, { type NextAuthConfig } from "next-auth";
 import Nodemailer from "next-auth/providers/nodemailer";
 import { PrismaAdapter } from "@auth/prisma-adapter";
+import { getApiTokenUserId } from "@/lib/api-token";
 import { prisma } from "@/lib/db/client";
 import { ensureWorkspaceForUser, getPrimaryWorkspace } from "@/lib/workspace";
 
@@ -50,6 +51,11 @@ export const authConfig = {
 export const { handlers, auth, signIn, signOut } = NextAuth(authConfig);
 
 export async function getCurrentUserId(): Promise<string | null> {
+  // A bearer token, when sent, decides on its own: a bad token never falls
+  // through to a cookie session.
+  const tokenUserId = await getApiTokenUserId();
+  if (tokenUserId !== undefined) return tokenUserId;
+
   const session = await auth();
   return session?.user?.id ?? null;
 }

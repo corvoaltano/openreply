@@ -110,6 +110,13 @@ Optional, for tuning the polling reconciler (defaults are fine to start):
 | `COMMENT_POLL_MAX_PER_SWEEP` | `30` | Max new comments each campaign acts on per sweep. Keep it conservative; higher gets closer to Instagram's rate limits. |
 | `COMMENT_POLL_LOOKBACK_HOURS` | `72` | How far back a sweep considers comments. |
 
+Optional, for scripted API access (e.g. a local MCP server). Requests with `Authorization: Bearer <token>` act as that user; leave either unset and bearer tokens are refused:
+
+| Variable | What it does |
+| --- | --- |
+| `MCP_API_TOKEN_SHA256` | SHA-256 (hex) of the API token. Only the hash goes on the server; the token stays with the client. |
+| `MCP_API_USER_EMAIL` | Sign-in email of the user the token acts as. |
+
 ## The Meta app
 
 This is the slow part. The code works out of the box; getting Meta to send you comment events is where people lose an afternoon. Every step here exists because skipping it breaks something later. Have your Vercel domain from Step 3 ready, you will paste it in a few times.
