@@ -1235,6 +1235,18 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
       sendFollowPrompt = follows !== true;
     }
 
+    // Opening DM on a DM campaign: a confirmed follower (or anyone, when the
+    // follow gate is off) first gets a short opener with a button instead of
+    // the link. Tapping it fires the postback that delivers the reveal, so the
+    // link only ever goes out after an explicit tap — one more human step
+    // between the keyword and the URL. With the gate on, the button carries
+    // `followcheck:` so following is re-verified at tap time too.
+    const useOpeningDm =
+      !sendFollowPrompt &&
+      automation.openingDmEnabled &&
+      Boolean(automation.openingDmMessage) &&
+      Boolean(automation.openingDmButtonLabel);
+
     const usage = await reserveWorkspaceDMSend(automation.workspaceId);
     if (!usage.allowed) {
       await prisma.dmLog.upsert({
@@ -1272,6 +1284,21 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           promptText,
           automation.followPromptButtonLabel || "I'm following ✅",
           `followcheck:${automation.id}`
+        );
+      } else if (useOpeningDm) {
+        const openingText = renderMessageWithoutLink({
+          message: automation.openingDmMessage as string,
+          commenterName,
+        });
+        await sendDirectMessageWithButton(
+          accessToken,
+          automation.instagramAccount.instagramId,
+          senderId,
+          openingText,
+          automation.openingDmButtonLabel as string,
+          automation.requireFollow
+            ? `followcheck:${automation.id}`
+            : `reveal:${automation.id}`
         );
       } else {
         await sendRevealDirectMessage(
