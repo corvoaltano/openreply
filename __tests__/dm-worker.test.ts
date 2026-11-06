@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const {
   mockPrisma,
@@ -123,8 +123,12 @@ vi.mock("bullmq", () => {
       close: vi.fn(),
     };
   }
+  class DelayedError extends Error {
+    name = "DelayedError";
+  }
   return {
     Worker: MockWorker,
+    DelayedError,
   };
 });
 
@@ -1394,5 +1398,66 @@ describe("DM Worker — campaign type isolation", () => {
     );
     expect(mockSendDirectMessage).not.toHaveBeenCalled();
     expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
+});
+
+describe("DM Worker - first-contact jitter", () => {
+  function jitterJob(extra: Record<string, unknown> = {}, name?: string) {
+    return {
+      name,
+      data: { ...mockJobData, ...extra },
+      id: "job_j",
+      attemptsMade: 0,
+      updateData: vi.fn().mockResolvedValue(undefined),
+      moveToDelayed: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+  type Proc = (job: unknown, token?: string) => Promise<void>;
+
+  beforeEach(() => {
+    process.env.DM_JITTER_MIN_MS = "15000";
+    process.env.DM_JITTER_MAX_MS = "90000";
+  });
+  afterEach(() => {
+    process.env.DM_JITTER_MAX_MS = "0";
+    delete process.env.DM_JITTER_MIN_MS;
+  });
+
+  it("pickDmJitterMs stays in 15-90s and 0 disables", async () => {
+    const { pickDmJitterMs } = await import("../lib/queue/dm-worker");
+    expect(pickDmJitterMs({}, () => 0)).toBe(15000);
+    expect(pickDmJitterMs({}, () => 1)).toBe(90000);
+    expect(pickDmJitterMs({ DM_JITTER_MAX_MS: "0" }, () => 0.5)).toBe(0);
+  });
+
+  it("parks a first comment job with a delay and sends nothing", async () => {
+    const processor = getProcessor() as unknown as Proc;
+    const job = jitterJob();
+    await expect(processor(job, "tok")).rejects.toMatchObject({
+      name: "DelayedError",
+    });
+    expect(job.updateData).toHaveBeenCalledWith(
+      expect.objectContaining({ jitterDone: true }),
+    );
+    const until = job.moveToDelayed.mock.calls[0][0] as number;
+    expect(until - Date.now()).toBeGreaterThan(14000);
+    expect(until - Date.now()).toBeLessThanOrEqual(90500);
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockPrisma.automation.findMany).not.toHaveBeenCalled();
+  });
+
+  it("does not delay again once jitterDone is set", async () => {
+    const processor = getProcessor() as unknown as Proc;
+    const job = jitterJob({ jitterDone: true });
+    await processor(job, "tok");
+    expect(job.moveToDelayed).not.toHaveBeenCalled();
+    expect(mockPrisma.automation.findMany).toHaveBeenCalled();
+  });
+
+  it("never delays postbacks", async () => {
+    const processor = getProcessor() as unknown as Proc;
+    const job = jitterJob({ userId: "u1", payload: "reveal:auto_789" }, "process-postback");
+    await processor(job, "tok").catch(() => undefined);
+    expect(job.moveToDelayed).not.toHaveBeenCalled();
   });
 });

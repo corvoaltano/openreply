@@ -1,4 +1,4 @@
-import { Worker, type Job } from "bullmq";
+import { DelayedError, Worker, type Job } from "bullmq";
 import {
   getDMQueue,
   getRedisConnection,
@@ -40,6 +40,43 @@ import {
 } from "@/lib/tracking/message";
 
 const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
+
+// First-contact jitter. An instant DM the moment someone comments or messages
+// looks like a bot to Instagram. Before the first reply to a comment or an
+// inbound DM keyword, the job is parked in the queue (BullMQ delay, no worker
+// slot held) for a random DM_JITTER_MIN_MS..DM_JITTER_MAX_MS. Button taps
+// (postbacks), follow-ups and rate-limit requeues are never delayed. Set
+// DM_JITTER_MAX_MS=0 to disable (tests).
+export function pickDmJitterMs(
+  env: Record<string, string | undefined> = process.env,
+  random: () => number = Math.random
+): number {
+  const parse = (v: string | undefined, d: number) => {
+    const n = v === undefined || v === "" ? d : Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : d;
+  };
+  const min = parse(env.DM_JITTER_MIN_MS, 15_000);
+  const max = parse(env.DM_JITTER_MAX_MS, 90_000);
+  if (max <= 0) return 0;
+  const lo = Math.min(min, max);
+  return Math.round(lo + random() * (max - lo));
+}
+
+// Parks a first-contact job once. Returns normally when the job should proceed
+// now; otherwise moves it to the delayed set and throws DelayedError, which
+// BullMQ treats as "handled" (no attempt consumed, same jobId, so dedupe holds).
+async function applyFirstContactJitter(
+  job: Job<DmQueueJob>,
+  token?: string
+): Promise<void> {
+  const data = job.data as { jitterDone?: boolean; requeueAttempt?: number };
+  if (data.jitterDone || (data.requeueAttempt ?? 0) > 0) return;
+  const delay = pickDmJitterMs();
+  if (delay <= 0 || !token || typeof job.moveToDelayed !== "function") return;
+  await job.updateData({ ...job.data, jitterDone: true });
+  await job.moveToDelayed(Date.now() + delay, token);
+  throw new DelayedError();
+}
 
 function formatError(error: unknown): string {
   if (error instanceof MetaApiError) {
@@ -1412,7 +1449,10 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
   }
 }
 
-async function processJob(job: Job<DmQueueJob>): Promise<void> {
+async function processJob(
+  job: Job<DmQueueJob>,
+  token?: string
+): Promise<void> {
   if (job.name === POSTBACK_JOB_NAME) {
     return processPostback(job as Job<ProcessPostbackJob>);
   }
@@ -1420,8 +1460,10 @@ async function processJob(job: Job<DmQueueJob>): Promise<void> {
     return processFollowUp(job as Job<ProcessFollowUpJob>);
   }
   if (job.name === MESSAGE_JOB_NAME) {
+    await applyFirstContactJitter(job, token);
     return processMessage(job as Job<ProcessMessageJob>);
   }
+  await applyFirstContactJitter(job, token);
   return processComment(job as Job<ProcessCommentJob>);
 }
 

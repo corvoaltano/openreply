@@ -33,6 +33,8 @@ export interface ProcessCommentJob {
   // Which path enqueued this comment. Recorded in the shared ProcessedComment
   // dedup store so the reconciler can tell webhook- from polling-caught comments.
   source?: CommentSource;
+  // Set by the worker once the first-contact jitter delay has been served.
+  jitterDone?: boolean;
 }
 
 // Delivered when a user taps an opening DM's button — carries the reveal target.
@@ -61,6 +63,8 @@ export interface ProcessMessageJob {
   messageId: string;
   messageText: string;
   senderId: string;
+  // Set by the worker once the first-contact jitter delay has been served.
+  jitterDone?: boolean;
 }
 
 export type DmQueueJob =
