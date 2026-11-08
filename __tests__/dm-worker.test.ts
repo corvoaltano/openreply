@@ -15,6 +15,7 @@ const {
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
+  mockSendCommentReply,
 } = vi.hoisted(() => ({
   mockPrisma: {
     automation: {
@@ -24,6 +25,7 @@ const {
     dmLog: {
       findUnique: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
       create: vi.fn(),
@@ -48,6 +50,7 @@ const {
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
+  mockSendCommentReply: vi.fn(),
 }));
 
 vi.mock("@/lib/db/client", () => ({
@@ -62,7 +65,7 @@ vi.mock("@/lib/meta/client", () => ({
   sendDirectMessageWithButton: mockSendDirectMessageWithButton,
   sendDirectMessage: mockSendDirectMessage,
   sendDirectMessageWithLinkButton: mockSendDirectMessageWithLinkButton,
-  sendCommentReply: vi.fn(),
+  sendCommentReply: mockSendCommentReply,
   MetaApiError: class MetaApiError extends Error {
     code: number;
     constructor(
@@ -232,6 +235,8 @@ beforeEach(() => {
   mockPrisma.automation.findFirst.mockResolvedValue(null);
   mockPrisma.dmLog.findUnique.mockResolvedValue(null);
   mockPrisma.dmLog.create.mockResolvedValue({});
+  mockPrisma.dmLog.findMany.mockResolvedValue([]);
+  mockSendCommentReply.mockResolvedValue({ id: "reply_1" });
   // Two different lookups share findFirst: the cross-campaign private-reply
   // check (keyed on status SENT) and the postback's name lookup. Only the
   // latter should resolve by default, or every comment would look like a
@@ -1459,5 +1464,205 @@ describe("DM Worker - first-contact jitter", () => {
     const job = jitterJob({ userId: "u1", payload: "reveal:auto_789" }, "process-postback");
     await processor(job, "tok").catch(() => undefined);
     expect(job.moveToDelayed).not.toHaveBeenCalled();
+  });
+});
+
+describe("DM Worker — comment threads and smart public reply", () => {
+  const threadJob = () =>
+    createMockJob({ ...mockJobData, commentId: "reply_777", parentId: "comment_555" } as typeof mockJobData);
+
+  it("does nothing but log SKIPPED_DEDUP for an any-word campaign in an answered thread", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...mockAutomation, matchAnyWord: true, publicReplyEnabled: true, publicReplyMessages: ["Gönderdim"] },
+    ]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([{ commenterId: "someone_else", status: "SENT" }]);
+
+    await getProcessor()(threadJob());
+
+    expect(mockPrisma.dmLog.findMany).toHaveBeenCalledWith({
+      where: {
+        OR: [{ commentId: "comment_555" }, { parentCommentId: "comment_555" }],
+        NOT: { commentId: "reply_777" },
+      },
+      select: { commenterId: true, status: true, publicReplySentAt: true },
+    });
+    expect(mockSendCommentReply).not.toHaveBeenCalled();
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ status: "SKIPPED_DEDUP", parentCommentId: "comment_555" }),
+    });
+  });
+
+  it("skips the commenter who already got the DM in this thread", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation, publicReplyEnabled: true, publicReplyMessages: ["x"] }]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([{ commenterId: "commenter_999", status: "SENT" }]);
+
+    await getProcessor()(threadJob());
+
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockSendCommentReply).not.toHaveBeenCalled();
+  });
+
+  it("retries the DM (no public reply) when the commenter's earlier DM failed", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...mockAutomation, matchAnyWord: true, publicReplyEnabled: true, publicReplyMessages: ["Gönderdim"] },
+    ]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([{ commenterId: "commenter_999", status: "FAILED" }]);
+
+    await getProcessor()(threadJob());
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    expect(mockSendCommentReply).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ status: "PENDING", parentCommentId: "comment_555" }),
+    });
+  });
+
+  it("lets a newcomer who typed the keyword get the DM, without a public reply", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation, publicReplyEnabled: true, publicReplyMessages: ["x"] }]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([{ commenterId: "someone_else", status: "SENT" }]);
+
+    await getProcessor()(threadJob());
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    expect(mockSendCommentReply).not.toHaveBeenCalled();
+  });
+
+  it("treats a reply in an unanswered thread like a normal comment", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation, publicReplyEnabled: true, publicReplyMessages: ["Gönderdim"] }]);
+
+    await getProcessor()(threadJob());
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    expect(mockSendCommentReply).toHaveBeenCalledWith("decrypted_token", "reply_777", "Gönderdim");
+  });
+
+  const smart = {
+    ...mockAutomation,
+    publicReplyEnabled: true,
+    smartPublicReply: true,
+    publicReplyMessages: ["Gönderdim, DM kutuna bak"],
+    publicReplyRequestMessages: ["İsteklere düşmüş olabilir, bana {kelime} yaz"],
+    publicReplyFailedMessages: ["DM gidemedi, bana {kelime} yaz"],
+    replyCtaKeyword: "GOOGLE",
+  };
+
+  it("smart: delivered to a confirmed follower → plain pool, posted after the DM", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([smart]);
+    mockGetUserFollowStatus.mockResolvedValue(true);
+
+    await getProcessor()(createMockJob());
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    expect(mockSendCommentReply).toHaveBeenCalledWith("decrypted_token", "comment_555", "Gönderdim, DM kutuna bak");
+    expect(mockSendPrivateReply.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSendCommentReply.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("smart: delivered but follow unverifiable → message-requests pool with {kelime}", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([smart]);
+    mockGetUserFollowStatus.mockResolvedValue(null);
+
+    await getProcessor()(createMockJob());
+
+    expect(mockSendCommentReply).toHaveBeenCalledWith(
+      "decrypted_token",
+      "comment_555",
+      "İsteklere düşmüş olabilir, bana GOOGLE yaz",
+    );
+  });
+
+  it("smart: private reply refused → failed pool, first keyword when no CTA keyword", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...smart, replyCtaKeyword: null }]);
+    mockSendPrivateReply.mockRejectedValue(
+      new (MetaApiError as unknown as new (...a: unknown[]) => Error)(100, undefined, undefined, "The comment is invalid for a private reply"),
+    );
+
+    await getProcessor()(createMockJob());
+
+    expect(mockSendCommentReply).toHaveBeenCalledWith("decrypted_token", "comment_555", "DM gidemedi, bana LINK yaz");
+  });
+
+  it("smart: user not found → no public reply", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockPrisma.automation.findMany.mockResolvedValue([smart]);
+    mockSendPrivateReply.mockRejectedValue(
+      new (MetaApiError as unknown as new (...a: unknown[]) => Error)(100, undefined, undefined, "The requested user cannot be found."),
+    );
+
+    await getProcessor()(createMockJob());
+
+    expect(mockSendCommentReply).not.toHaveBeenCalled();
+  });
+
+  it("smart: identical pools skip the follow lookup", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...smart, publicReplyRequestMessages: [] }]);
+
+    await getProcessor()(createMockJob());
+
+    expect(mockGetUserFollowStatus).not.toHaveBeenCalled();
+    expect(mockSendCommentReply).toHaveBeenCalledWith("decrypted_token", "comment_555", "Gönderdim, DM kutuna bak");
+  });
+
+  it("classic mode still posts the public reply before the DM", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...mockAutomation, publicReplyEnabled: true, publicReplyMessages: ["Gönderdim"] }]);
+
+    await getProcessor()(createMockJob());
+
+    expect(mockSendCommentReply.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSendPrivateReply.mock.invocationCallOrder[0],
+    );
+  });
+});
+
+describe("DM Worker — review fixes", () => {
+  const smart = {
+    ...mockAutomation,
+    publicReplyEnabled: true,
+    smartPublicReply: true,
+    publicReplyMessages: ["Gönderdim"],
+    publicReplyRequestMessages: [],
+    publicReplyFailedMessages: ["DM gidemedi, bana {kelime} yaz"],
+  };
+
+  it("does not claim 'DMs closed' when the refusal comes on a retry", async () => {
+    const { MetaApiError } = await import("@/lib/meta/client");
+    mockPrisma.automation.findMany.mockResolvedValue([smart]);
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ status: "FAILED", errorMessage: "timeout", publicReplySentAt: null });
+    mockSendPrivateReply.mockRejectedValue(
+      new (MetaApiError as unknown as new (...a: unknown[]) => Error)(100, undefined, undefined, "The comment is invalid for a private reply"),
+    );
+
+    await getProcessor()({ ...createMockJob(), attemptsMade: 1 });
+
+    expect(mockSendCommentReply).not.toHaveBeenCalled();
+  });
+
+  it("a thread whose parent delivered nothing yet is not 'answered'", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...mockAutomation, matchAnyWord: true, publicReplyEnabled: true, publicReplyMessages: ["Gönderdim"] },
+    ]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([{ commenterId: "commenter_999", status: "PENDING", publicReplySentAt: null }]);
+
+    await getProcessor()(createMockJob({ ...mockJobData, commentId: "reply_777", parentId: "comment_555" } as typeof mockJobData));
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    expect(mockSendCommentReply).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("DM Worker — oneReplyPerThread opt-out", () => {
+  it("handles a reply in an answered thread like a fresh comment when the campaign opts out", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      { ...mockAutomation, oneReplyPerThread: false, publicReplyEnabled: true, publicReplyMessages: ["Gönderdim"] },
+    ]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([{ commenterId: "commenter_999", status: "SENT", publicReplySentAt: new Date() }]);
+
+    await getProcessor()(createMockJob({ ...mockJobData, commentId: "reply_777", parentId: "comment_555" } as typeof mockJobData));
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    expect(mockSendCommentReply).toHaveBeenCalledTimes(1);
   });
 });

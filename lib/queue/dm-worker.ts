@@ -117,6 +117,79 @@ function isPermanentRejection(error: unknown): boolean {
   return PERMANENT_REJECTIONS.some((pattern) => pattern.test(message));
 }
 
+// Instagram refused the private reply for this comment: in practice the
+// commenter's messaging is closed (or the comment is gone). The one DM outcome
+// a smart public reply explains with "your DMs are closed, message me instead".
+const PRIVATE_REPLY_REFUSED = /invalid for a private reply/i;
+
+const THREAD_ANSWERED_MESSAGE =
+  "Comment thread already answered; one automatic reply per thread";
+
+type PublicReplyCampaign = {
+  id: string;
+  keywords: string[];
+  publicReplyMessage: string | null;
+  publicReplyMessages: string[];
+  publicReplyRequestMessages?: string[];
+  publicReplyFailedMessages?: string[];
+  replyCtaKeyword?: string | null;
+  trackedLinks: Array<{ slug: string; label: string | null; destinationUrl: string }>;
+};
+
+// Pool for "the DM was delivered". Delivered to a confirmed follower → the
+// plain pool; follow status unverifiable → the message-requests pool (falls
+// back to the plain pool when the campaign has none).
+function deliveredReplyPool(
+  automation: PublicReplyCampaign,
+  isFollower: boolean | null
+): string[] {
+  const plain =
+    automation.publicReplyMessages.length > 0
+      ? automation.publicReplyMessages
+      : automation.publicReplyMessage
+        ? [automation.publicReplyMessage]
+        : [];
+  const request = automation.publicReplyRequestMessages ?? [];
+  if (isFollower === true) return plain.length > 0 ? plain : request;
+  return request.length > 0 ? request : plain;
+}
+
+// Post one public comment reply picked at random from the pool. {kelime} /
+// {keyword} become the keyword people should DM us. Idempotent via
+// publicReplySentAt; a failure is recorded on the log, never thrown.
+async function postPublicReply(
+  automation: PublicReplyCampaign,
+  accessToken: string,
+  commentId: string,
+  commenterName: string | undefined,
+  pool: string[]
+): Promise<void> {
+  if (pool.length === 0) return;
+  const where = {
+    automationId_commentId: { automationId: automation.id, commentId },
+  };
+  try {
+    const chosen = pool[Math.floor(Math.random() * pool.length)];
+    const ctaKeyword =
+      automation.replyCtaKeyword?.trim() || automation.keywords[0] || "";
+    const publicReply = renderMessageWithTracking({
+      message: chosen.replace(/\{(kelime|keyword)\}/gi, ctaKeyword),
+      commenterName,
+      trackedLinks: automation.trackedLinks,
+    });
+    await sendCommentReply(accessToken, commentId, publicReply);
+    await prisma.dmLog.update({
+      where,
+      data: { publicReplySentAt: new Date(), publicReplyError: null },
+    });
+  } catch (error) {
+    console.error("[DM Worker] Public comment reply failed:", formatError(error));
+    await prisma.dmLog
+      .update({ where, data: { publicReplyError: formatError(error) } })
+      .catch(() => {});
+  }
+}
+
 // A DM keyword trigger answers a request ("repo", "send the link"), not a
 // conversation. A long message that merely mentions the keyword is someone
 // chatting, so it must not get an autoreply in the middle of a conversation.
@@ -303,6 +376,35 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     orderBy: { createdAt: "asc" },
   });
 
+  // One automatic answer per comment thread. A reply under a comment we
+  // already handled (most often someone answering OUR public reply: "it
+  // didn't arrive", "thanks") must not fire the campaign again. Instagram
+  // threads are flat, so the thread is the parent comment plus every reply
+  // logged under it. This comment's own rows are excluded so its retries
+  // still run.
+  const parentId = job.data.parentId;
+  const threadLogs =
+    parentId && automations.length > 0
+      ? await prisma.dmLog.findMany({
+          where: {
+            OR: [{ commentId: parentId }, { parentCommentId: parentId }],
+            NOT: { commentId },
+          },
+          select: { commenterId: true, status: true, publicReplySentAt: true },
+        })
+      : [];
+  // Only rows where something actually reached Instagram count as an answer.
+  // A parent still PENDING / rate-limited / over plan delivered nothing, so a
+  // reply under it is not "a second answer".
+  const answeredRows = threadLogs.filter(
+    (l) =>
+      l.status === "SENT" ||
+      l.status === "FAILED" ||
+      l.status === "SKIPPED_DEDUP" ||
+      Boolean(l.publicReplySentAt)
+  );
+  const threadAnswered = answeredRows.length > 0;
+
   for (const automation of automations) {
     // "Any word" campaigns fire on every comment; otherwise require a keyword hit.
     const matchResult = automation.matchAnyWord
@@ -334,9 +436,53 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     // already sent but whose public reply never posted (e.g. it hit a rate
     // limit) must still come back so the public reply can be retried.
     if (existingLog?.status === "SKIPPED_PLAN_LIMIT") continue;
+    if (
+      existingLog?.status === "SKIPPED_DEDUP" &&
+      existingLog.errorMessage === THREAD_ANSWERED_MESSAGE
+    ) {
+      continue;
+    }
     if (alreadyDmd && (alreadyPublicReplied || !automation.publicReplyEnabled)) {
       continue;
     }
+
+    // Inside an answered thread: never another public reply. The DM goes only
+    // to someone who has not received one in this thread yet, and then only
+    // when their earlier attempt failed (they replied "it didn't arrive") or,
+    // for a keyword campaign, when they are new to the thread and typed the
+    // keyword. An any-word campaign never DMs a newcomer to an answered thread.
+    // A campaign can opt out (oneReplyPerThread = false): then a reply is
+    // handled exactly like a fresh comment.
+    const inAnsweredThread =
+      threadAnswered && automation.oneReplyPerThread !== false;
+    if (inAnsweredThread && !existingLog) {
+      const mine = answeredRows.filter((l) => l.commenterId === commenterId);
+      const alreadyGotDm = mine.some((l) => l.status === "SENT");
+      const earlierFailed = mine.some((l) => l.status === "FAILED");
+      const allowDm =
+        !alreadyGotDm &&
+        (earlierFailed || (!automation.matchAnyWord && mine.length === 0));
+      if (!allowDm) {
+        await prisma.dmLog.create({
+          data: {
+            workspaceId: automation.workspaceId,
+            automationId: automation.id,
+            instagramAccountId: automation.instagramAccountId,
+            commenterId,
+            commenterName,
+            commentText,
+            commentId,
+            parentCommentId: parentId ?? null,
+            matchedKeyword: matchResult.matchedKeyword,
+            status: "SKIPPED_DEDUP",
+            errorMessage: THREAD_ANSWERED_MESSAGE,
+          },
+        });
+        continue;
+      }
+    }
+    const publicReplyAllowed = automation.publicReplyEnabled && !inAnsweredThread;
+    const smartReply = publicReplyAllowed && automation.smartPublicReply === true;
 
     if (!automation.instagramAccount.accessToken) {
       await prisma.dmLog.upsert({
@@ -410,6 +556,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           commenterName,
           commentText,
           commentId,
+          parentCommentId: parentId ?? null,
           matchedKeyword: matchResult.matchedKeyword,
           status: "PENDING",
           attempts: job.attemptsMade + 1,
@@ -429,53 +576,67 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       });
     }
 
-    // Public reply leg — decoupled from the DM and posted first so a DM failure
-    // (e.g. a non-follower whose messaging is restricted) never suppresses it.
-    // Idempotent across retries via publicReplySentAt.
-    const replyPool =
-      automation.publicReplyMessages.length > 0
-        ? automation.publicReplyMessages
-        : automation.publicReplyMessage
-          ? [automation.publicReplyMessage]
-          : [];
-    if (
-      automation.publicReplyEnabled &&
-      replyPool.length > 0 &&
-      !existingLog?.publicReplySentAt
-    ) {
-      try {
-        const chosen = replyPool[Math.floor(Math.random() * replyPool.length)];
-        const publicReply = renderMessageWithTracking({
-          message: chosen,
-          commenterName,
-          trackedLinks: automation.trackedLinks,
-        });
-        await sendCommentReply(accessToken, commentId, publicReply);
-        await prisma.dmLog.update({
-          where: {
-            automationId_commentId: { automationId: automation.id, commentId },
-          },
-          data: { publicReplySentAt: new Date(), publicReplyError: null },
-        });
-      } catch (error) {
-        console.error(
-          "[DM Worker] Public comment reply failed:",
-          formatError(error)
-        );
-        await prisma.dmLog
-          .update({
-            where: {
-              automationId_commentId: { automationId: automation.id, commentId },
-            },
-            data: { publicReplyError: formatError(error) },
-          })
-          .catch(() => {});
-      }
+    // Public reply leg. Classic mode posts it first, decoupled from the DM, so
+    // a DM failure never suppresses it. Smart mode posts it AFTER the DM,
+    // picked by the DM's real outcome (see replyAfterDm below). Idempotent
+    // across retries via publicReplySentAt.
+    const replyPending = publicReplyAllowed && !existingLog?.publicReplySentAt;
+    if (replyPending && !smartReply) {
+      await postPublicReply(
+        automation,
+        accessToken,
+        commentId,
+        commenterName,
+        deliveredReplyPool(automation, true)
+      );
     }
 
-    // DM already sent on an earlier pass; the public reply retry above was all
-    // this run needed. Don't re-send the DM.
-    if (!needsDm) continue;
+    // Follow status if already known for this comment (follow-gated
+    // campaigns look it up anyway); undefined = not looked up yet.
+    let knownFollower: boolean | null | undefined;
+    // "Refused" on a retry is ambiguous: an earlier attempt may have used up
+    // the comment's single private reply (delivered, response lost), and Meta
+    // then answers "invalid for a private reply" too. Only a first real send
+    // attempt may tell someone their DMs are closed.
+    const firstSendAttempt =
+      job.attemptsMade === 0 &&
+      (!existingLog ||
+        existingLog.errorMessage === "Hourly rate limit hit; retry scheduled");
+    // Never throws: it runs inside the DM try/catch, and a throw there would
+    // mark a delivered DM as FAILED and retry it (double DM).
+    const replyAfterDm = async (outcome: "delivered" | "refused") => {
+      try {
+        await replyAfterDmUnsafe(outcome);
+      } catch (error) {
+        console.error("[DM Worker] Smart public reply skipped:", formatError(error));
+      }
+    };
+    const replyAfterDmUnsafe = async (outcome: "delivered" | "refused") => {
+      if (!smartReply || !replyPending) return;
+      let pool: string[];
+      if (outcome === "refused") {
+        if (!firstSendAttempt) return;
+        pool = automation.publicReplyFailedMessages ?? [];
+      } else {
+        // Only spend the profile lookup when the two pools actually differ.
+        const differs =
+          (automation.publicReplyRequestMessages ?? []).length > 0 &&
+          (automation.publicReplyMessages.length > 0 ||
+            Boolean(automation.publicReplyMessage));
+        if (differs && knownFollower === undefined) {
+          knownFollower = await getUserFollowStatus(accessToken, commenterId);
+        }
+        pool = deliveredReplyPool(automation, knownFollower ?? null);
+      }
+      await postPublicReply(automation, accessToken, commentId, commenterName, pool);
+    };
+
+    // DM already sent on an earlier pass; only the public reply was missing.
+    // Don't re-send the DM.
+    if (!needsDm) {
+      await replyAfterDm("delivered");
+      continue;
+    }
 
     // Meta allows exactly ONE private reply per comment, ever — across every
     // campaign. When several campaigns match the same comment (duplicated
@@ -617,6 +778,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     let sendFollowPrompt = false;
     if (automation.requireFollow && !useOpeningDm) {
       const alreadyFollows = await getUserFollowStatus(accessToken, commenterId);
+      knownFollower = alreadyFollows;
       sendFollowPrompt = alreadyFollows !== true;
     }
 
@@ -729,6 +891,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           errorMessage: null,
         },
       });
+      await replyAfterDm("delivered");
     } catch (error) {
       await releaseWorkspaceDMReservation(
         automation.workspaceId,
@@ -759,6 +922,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
               "Meta reported an unknown error; delivery likely succeeded, not retried to avoid double-send",
           },
         });
+        await replyAfterDm("delivered");
         continue;
       }
 
@@ -776,7 +940,14 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         },
       });
       // Logged as FAILED, but not retried: a retry hits the same wall.
-      if (isPermanentRejection(error)) continue;
+      if (isPermanentRejection(error)) {
+        // Messaging closed: tell them publicly how to get it anyway. A user
+        // that cannot be found gets no reply.
+        if (PRIVATE_REPLY_REFUSED.test(formatError(error))) {
+          await replyAfterDm("refused");
+        }
+        continue;
+      }
       throw error;
     }
   }

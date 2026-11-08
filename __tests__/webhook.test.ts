@@ -99,6 +99,35 @@ describe("parseCommentEvents", () => {
     });
   });
 
+  it("carries parent_id as parentId for a reply inside a thread", () => {
+    const payload = {
+      object: "instagram",
+      entry: [
+        {
+          id: "page_123",
+          time: 1234567890,
+          changes: [
+            {
+              field: "comments",
+              value: {
+                id: "reply_999",
+                parent_id: "comment_456",
+                text: "@fatihbellissoy gelmedi",
+                from: { id: "user_789", username: "testuser" },
+                media: { id: "media_101" },
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const events = parseCommentEvents(payload);
+    expect(events).toHaveLength(1);
+    expect(events[0].commentId).toBe("reply_999");
+    expect(events[0].parentId).toBe("comment_456");
+  });
+
   it("should ignore non-instagram objects", () => {
     const payload = {
       object: "page",

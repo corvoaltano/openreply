@@ -102,6 +102,7 @@ export async function POST(request: NextRequest) {
           commenterId: event.commenterId,
           commenterName: event.commenterName,
           mediaId: event.mediaId,
+          parentId: event.parentId,
           source: "WEBHOOK",
         },
         {

@@ -21,6 +21,10 @@ const MAX_CAMPAIGN_POSTS = 20;
 
 const postIdsSchema = z.array(z.string().min(1)).max(MAX_CAMPAIGN_POSTS);
 
+function cleanReplyList(list: string[]): string[] {
+  return list.map((m) => m.trim()).filter(Boolean);
+}
+
 /**
  * The full post list for a specific-post campaign. `postIds` wins when sent;
  * a client that only sends `postId` (older builder, duplicate, import) gets a
@@ -76,6 +80,20 @@ const createAutomationSchema = z
       .max(10)
       .optional()
       .default([]),
+    // Smart public reply (see Automation in prisma/schema.prisma).
+    smartPublicReply: z.boolean().optional().default(false),
+    publicReplyRequestMessages: z
+      .array(z.string().max(1000))
+      .max(10)
+      .optional()
+      .default([]),
+    publicReplyFailedMessages: z
+      .array(z.string().max(1000))
+      .max(10)
+      .optional()
+      .default([]),
+    replyCtaKeyword: z.string().max(50).optional().nullable(),
+    oneReplyPerThread: z.boolean().optional().default(true),
     // Empty string means "no tracked link"; a URL sets one.
     trackedDestinationUrl: z
       .union([z.string().url(), z.literal("")])
@@ -143,6 +161,11 @@ const updateAutomationSchema = z.object({
   publicReplyEnabled: z.boolean().optional(),
   publicReplyMessage: z.string().max(1000).optional().nullable(),
   publicReplyMessages: z.array(z.string().max(1000)).max(10).optional(),
+  smartPublicReply: z.boolean().optional(),
+  publicReplyRequestMessages: z.array(z.string().max(1000)).max(10).optional(),
+  publicReplyFailedMessages: z.array(z.string().max(1000)).max(10).optional(),
+  replyCtaKeyword: z.string().max(50).optional().nullable(),
+  oneReplyPerThread: z.boolean().optional(),
   isActive: z.boolean().optional(),
   wholeWordMatch: z.boolean().optional(),
   reportShareEnabled: z.boolean().optional(),
@@ -475,6 +498,17 @@ export async function POST(request: NextRequest) {
       publicReplyMessage: parsed.data.publicReplyEnabled
         ? (publicReplyList[0] ?? parsed.data.publicReplyMessage ?? null)
         : null,
+      smartPublicReply: parsed.data.publicReplyEnabled
+        ? parsed.data.smartPublicReply
+        : false,
+      publicReplyRequestMessages: parsed.data.publicReplyEnabled
+        ? cleanReplyList(parsed.data.publicReplyRequestMessages)
+        : [],
+      publicReplyFailedMessages: parsed.data.publicReplyEnabled
+        ? cleanReplyList(parsed.data.publicReplyFailedMessages)
+        : [],
+      replyCtaKeyword: parsed.data.replyCtaKeyword?.trim() || null,
+      oneReplyPerThread: parsed.data.oneReplyPerThread,
       isActive: parsed.data.isActive,
       wholeWordMatch: parsed.data.wholeWordMatch,
       workspaceId,
@@ -611,6 +645,7 @@ export async function PATCH(request: NextRequest) {
     automationData.publicReplyEnabled = false;
     automationData.publicReplyMessages = [];
     automationData.publicReplyMessage = null;
+    automationData.smartPublicReply = false;
     // The user already opened the thread, so the opening DM never applies.
     automationData.openingDmEnabled = false;
     automationData.openingDmMessage = null;
@@ -628,9 +663,25 @@ export async function PATCH(request: NextRequest) {
     automationData.publicReplyMessages = list;
     automationData.publicReplyMessage = list[0] ?? null;
   }
+  if (automationData.publicReplyRequestMessages !== undefined) {
+    automationData.publicReplyRequestMessages = cleanReplyList(
+      automationData.publicReplyRequestMessages
+    );
+  }
+  if (automationData.publicReplyFailedMessages !== undefined) {
+    automationData.publicReplyFailedMessages = cleanReplyList(
+      automationData.publicReplyFailedMessages
+    );
+  }
+  if (automationData.replyCtaKeyword !== undefined) {
+    automationData.replyCtaKeyword = automationData.replyCtaKeyword?.trim() || null;
+  }
   if (automationData.publicReplyEnabled === false) {
     automationData.publicReplyMessages = [];
     automationData.publicReplyMessage = null;
+    automationData.smartPublicReply = false;
+    automationData.publicReplyRequestMessages = [];
+    automationData.publicReplyFailedMessages = [];
   }
 
   const updated = await prisma.automation.update({

@@ -76,6 +76,7 @@ export async function reconcileComments(): Promise<void> {
       keywords: true,
       wholeWordMatch: true,
       publicReplyEnabled: true,
+      smartPublicReply: true,
       workspaceId: true,
       instagramAccount: {
         select: {
@@ -117,6 +118,7 @@ async function sweepCampaign(
     keywords: string[];
     wholeWordMatch: boolean;
     publicReplyEnabled: boolean;
+    smartPublicReply: boolean;
     instagramAccount: {
       id: string;
       instagramId: string;
@@ -230,6 +232,16 @@ async function sweepCampaign(
             ? [{ publicReplySentAt: { not: null } }]
             : ([{ status: "SENT" }] as const)),
           { status: "FAILED" } as const,
+          // Smart public reply: several terminal outcomes legitimately post no
+          // reply (empty pool, another campaign already DM'd, plan limit).
+          // A SENT row is done unless its reply errored and deserves a retry.
+          ...(automation.publicReplyEnabled && automation.smartPublicReply
+            ? ([
+                { status: "SENT", publicReplyError: null },
+                { status: "SKIPPED_DEDUP" },
+                { status: "SKIPPED_PLAN_LIMIT" },
+              ] as const)
+            : []),
         ],
       },
       select: { commentId: true },

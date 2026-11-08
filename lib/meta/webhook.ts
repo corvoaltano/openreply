@@ -39,6 +39,8 @@ export interface WebhookCommentEvent {
   commenterId: string;
   commenterName?: string;
   mediaId: string;
+  // Top-level comment this one replies to; undefined for a top-level comment.
+  parentId?: string;
 }
 
 interface WebhookEntry {
@@ -58,6 +60,8 @@ interface WebhookEntry {
         id?: string;
       };
       media_id?: string;
+      // Present when the comment is a reply in a thread.
+      parent_id?: string;
     };
   }>;
   messaging?: Array<{
@@ -135,6 +139,9 @@ export function parseCommentEvents(payload: WebhookPayload): WebhookCommentEvent
         commenterId,
         commenterName: value.from?.username,
         mediaId,
+        ...(value.parent_id && value.parent_id !== commentId
+          ? { parentId: value.parent_id }
+          : {}),
       });
     }
   }

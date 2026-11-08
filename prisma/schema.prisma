@@ -208,6 +208,21 @@ model Automation {
   publicReplyEnabled      Boolean      @default(false)
   publicReplyMessage      String?
   publicReplyMessages     String[]     @default([])
+  // Smart public reply: the DM goes first and the comment reply is picked by
+  // the DM's real outcome. publicReplyMessages = delivered and the commenter
+  // is a confirmed follower; publicReplyRequestMessages = delivered but follow
+  // status unverifiable (likely in message requests; falls back to
+  // publicReplyMessages when empty); publicReplyFailedMessages = Instagram
+  // refused the private reply (messaging closed / comment gone; no reply when
+  // empty). {kelime} renders as replyCtaKeyword (else the first keyword).
+  smartPublicReply           Boolean  @default(false)
+  publicReplyRequestMessages String[] @default([])
+  publicReplyFailedMessages  String[] @default([])
+  replyCtaKeyword            String?
+  // One automatic answer per comment thread (replies under an answered
+  // comment are not answered again). Off = every matching reply is handled
+  // like a fresh comment, as before 2026-11-08.
+  oneReplyPerThread          Boolean  @default(true)
   isActive                Boolean      @default(true)
   wholeWordMatch          Boolean      @default(true)
   reportShareSlug         String?      @unique
@@ -240,6 +255,9 @@ model DmLog {
   commenterName  String?
   commentText    String
   commentId      String
+  // Top-level comment this one replies to (Instagram threads are flat), or
+  // null for a top-level comment. Lets the worker answer a thread only once.
+  parentCommentId String?
   matchedKeyword String?
   status         DmStatus  @default(PENDING)
   attempts       Int       @default(0)
@@ -264,6 +282,7 @@ model DmLog {
   @@index([automationId])
   @@index([instagramAccountId])
   @@index([status])
+  @@index([parentCommentId])
 }
 
 // Every comment the system has seen, from either the webhook or the polling

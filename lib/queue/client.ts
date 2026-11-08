@@ -29,6 +29,9 @@ export interface ProcessCommentJob {
   commenterId: string;
   commenterName?: string;
   mediaId: string;
+  // Set when the comment is a reply inside a thread: the top-level comment's
+  // id (Instagram threads are flat). Undefined for a top-level comment.
+  parentId?: string;
   requeueAttempt?: number;
   // Which path enqueued this comment. Recorded in the shared ProcessedComment
   // dedup store so the reconciler can tell webhook- from polling-caught comments.
