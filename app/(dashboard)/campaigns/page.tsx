@@ -11,6 +11,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import AccountSelect, { type AccountOption } from "@/components/account-select";
 import { readCache, writeCache } from "@/lib/client-cache";
+import { buildDuplicatePayload } from "@/lib/campaign-duplicate";
 
 interface Campaign {
   id: string;
@@ -31,6 +32,11 @@ interface Campaign {
   publicReplyEnabled: boolean;
   publicReplyMessage: string | null;
   publicReplyMessages: string[];
+  smartPublicReply?: boolean;
+  publicReplyRequestMessages?: string[];
+  publicReplyFailedMessages?: string[];
+  replyCtaKeyword?: string | null;
+  oneReplyPerThread?: boolean;
   requireFollow: boolean;
   followPromptMessage: string | null;
   followPromptButtonLabel: string | null;
@@ -241,39 +247,11 @@ export default function CampaignsPage() {
 
   async function duplicateAutomation(auto: Campaign) {
     setMenuOpenId(null);
-    const isDm = auto.campaignType === "DM";
-    const specific = !isDm && !auto.matchAnyPost && !auto.pendingNextReel;
     try {
       const res = await fetch("/api/automations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: `${auto.name} copy`,
-          campaignType: auto.campaignType,
-          instagramAccountId: auto.instagramAccountId,
-          postId: specific ? auto.postId : null,
-          postIds: specific ? (auto.postIds ?? []) : [],
-          postUrl: specific ? auto.postUrl : null,
-          matchAnyPost: auto.matchAnyPost,
-          pendingNextReel: auto.pendingNextReel,
-          matchAnyWord: auto.matchAnyWord,
-          keywords: auto.keywords,
-          dmTriggerEnabled: isDm ? true : undefined,
-          dmMessage: auto.dmMessage,
-          openingDmEnabled: isDm ? false : auto.openingDmEnabled,
-          openingDmMessage: auto.openingDmMessage,
-          openingDmButtonLabel: auto.openingDmButtonLabel,
-          publicReplyEnabled: auto.publicReplyEnabled,
-          publicReplyMessages: auto.publicReplyMessages,
-          trackedDestinationUrl: auto.trackedLinks[0]?.destinationUrl ?? "",
-          secondaryDestinationUrl: auto.trackedLinks[1]?.destinationUrl ?? "",
-          secondaryButtonLabel: auto.trackedLinks[1]?.label ?? "Open link",
-          requireFollow: auto.requireFollow,
-          followPromptMessage: auto.followPromptMessage,
-          followPromptButtonLabel: auto.followPromptButtonLabel,
-          wholeWordMatch: auto.wholeWordMatch,
-          isActive: false,
-        }),
+        body: JSON.stringify(buildDuplicatePayload(auto)),
       });
       const data = await res.json();
       if (data.success) void fetchAutomations();
