@@ -232,6 +232,9 @@ async function sweepCampaign(
             ? [{ publicReplySentAt: { not: null } }]
             : ([{ status: "SENT" }] as const)),
           { status: "FAILED" } as const,
+          // Past Meta's private-reply window, or refused by Meta: terminal,
+          // never re-enqueued by a sweep.
+          { status: "SKIPPED_NO_MATCH" } as const,
           // Smart public reply: several terminal outcomes legitimately post no
           // reply (empty pool, another campaign already DM'd, plan limit).
           // A SENT row is done unless its reply errored and deserves a retry.
@@ -267,6 +270,7 @@ async function sweepCampaign(
         commenterId: c.from!.id,
         commenterName: c.from?.username,
         mediaId,
+        commentTimestamp: c.timestamp,
         source: "POLLING",
       });
       stat.enqueued += 1;

@@ -122,6 +122,21 @@ function isPermanentRejection(error: unknown): boolean {
 // a smart public reply explains with "your DMs are closed, message me instead".
 const PRIVATE_REPLY_REFUSED = /invalid for a private reply/i;
 
+// Meta only accepts a private reply to a comment up to 7 days old.
+const PRIVATE_REPLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+export const PRIVATE_REPLY_TOO_OLD_MESSAGE = "atlandi: yorum 7 gunden eski";
+export const META_RED_PREFIX = "meta_red_ozel_yanit";
+
+export function isPastPrivateReplyWindow(
+  commentTimestamp: string | undefined,
+  now = Date.now()
+): boolean {
+  if (!commentTimestamp) return false;
+  const created = Date.parse(commentTimestamp);
+  if (Number.isNaN(created)) return false;
+  return now - created > PRIVATE_REPLY_WINDOW_MS;
+}
+
 const THREAD_ANSWERED_MESSAGE =
   "Comment thread already answered; one automatic reply per thread";
 
@@ -443,6 +458,34 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       continue;
     }
     if (alreadyDmd && (alreadyPublicReplied || !automation.publicReplyEnabled)) {
+      continue;
+    }
+
+    // Past Meta's 7-day private-reply window: skip without calling Meta and
+    // log it as skipped (not a failure).
+    if (needsDm && isPastPrivateReplyWindow(job.data.commentTimestamp)) {
+      await prisma.dmLog.upsert({
+        where: {
+          automationId_commentId: { automationId: automation.id, commentId },
+        },
+        create: {
+          workspaceId: automation.workspaceId,
+          automationId: automation.id,
+          instagramAccountId: automation.instagramAccountId,
+          commenterId,
+          commenterName,
+          commentText,
+          commentId,
+          parentCommentId: parentId ?? null,
+          matchedKeyword: matchResult.matchedKeyword,
+          status: "SKIPPED_NO_MATCH",
+          errorMessage: PRIVATE_REPLY_TOO_OLD_MESSAGE,
+        },
+        update: {
+          status: "SKIPPED_NO_MATCH",
+          errorMessage: PRIVATE_REPLY_TOO_OLD_MESSAGE,
+        },
+      });
       continue;
     }
 
@@ -934,12 +977,19 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           },
         },
         data: {
-          status: "FAILED",
+          // Meta's "comment invalid for a private reply" is a platform limit
+          // (old, already answered or deleted comment), not a real failure:
+          // own category, not counted as FAILED, never retried.
+          status: PRIVATE_REPLY_REFUSED.test(formatError(error))
+            ? "SKIPPED_NO_MATCH"
+            : "FAILED",
           attempts: job.attemptsMade + 1,
-          errorMessage: formatError(error),
+          errorMessage: PRIVATE_REPLY_REFUSED.test(formatError(error))
+            ? `${META_RED_PREFIX}: ${formatError(error)}`
+            : formatError(error),
         },
       });
-      // Logged as FAILED, but not retried: a retry hits the same wall.
+      // Not retried: a retry hits the same wall.
       if (isPermanentRejection(error)) {
         // Messaging closed: tell them publicly how to get it anyway. A user
         // that cannot be found gets no reply.

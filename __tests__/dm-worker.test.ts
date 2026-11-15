@@ -300,6 +300,29 @@ beforeEach(() => {
 });
 
 describe("DM Worker — Full Pipeline", () => {
+  it("skips a comment older than 7 days without calling Meta (atlandi, not FAILED)", async () => {
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    await getProcessor()(createMockJob({ ...mockJobData, commentTimestamp: old } as typeof mockJobData));
+
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+    expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          status: "SKIPPED_NO_MATCH",
+          errorMessage: "atlandi: yorum 7 gunden eski",
+        }),
+      }),
+    );
+  });
+
+  it("still sends for a comment younger than 7 days", async () => {
+    const fresh = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    await getProcessor()(createMockJob({ ...mockJobData, commentTimestamp: fresh } as typeof mockJobData));
+
+    expect(mockSendPrivateReply).toHaveBeenCalled();
+  });
+
   it("should send a private reply for a matching comment", async () => {
     const processor = getProcessor();
 
@@ -954,7 +977,7 @@ describe("DM Worker — one private reply per comment", () => {
     );
 
     const processor = getProcessor();
-    // Permanent: logged as FAILED but not re-thrown, so BullMQ does not retry
+    // Permanent: logged as meta_red (not FAILED) and not re-thrown, so BullMQ does not retry
     // a comment that can never take a private reply.
     await expect(processor(createMockJob())).resolves.toBeUndefined();
 
@@ -964,8 +987,8 @@ describe("DM Worker — one private reply per comment", () => {
     expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          status: "FAILED",
-          errorMessage: "The comment is invalid for a private reply",
+          status: "SKIPPED_NO_MATCH",
+          errorMessage: "meta_red_ozel_yanit: The comment is invalid for a private reply",
         }),
       }),
     );

@@ -41,6 +41,8 @@ export interface WebhookCommentEvent {
   mediaId: string;
   // Top-level comment this one replies to; undefined for a top-level comment.
   parentId?: string;
+  // Webhook event time (ISO), a proxy for the comment's creation time.
+  commentTimestamp?: string;
 }
 
 interface WebhookEntry {
@@ -139,6 +141,9 @@ export function parseCommentEvents(payload: WebhookPayload): WebhookCommentEvent
         commenterId,
         commenterName: value.from?.username,
         mediaId,
+        ...(entry.time > 0
+          ? { commentTimestamp: new Date(entry.time * 1000).toISOString() }
+          : {}),
         ...(value.parent_id && value.parent_id !== commentId
           ? { parentId: value.parent_id }
           : {}),

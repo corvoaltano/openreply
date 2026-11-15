@@ -96,6 +96,7 @@ describe("parseCommentEvents", () => {
       commenterId: "user_789",
       commenterName: "testuser",
       mediaId: "media_101",
+      commentTimestamp: new Date(1234567890 * 1000).toISOString(),
     });
   });
 
